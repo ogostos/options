@@ -58,7 +58,7 @@ export function ImportPreviewPanel({ preview }: { preview: ImportPreview }) {
         )}
       </Card>
 
-      {preview.trades.map((item, index) => {
+      {preview.trades.map((item) => {
         const color =
           item.matchStatus === "match"
             ? DESIGN.green
@@ -69,7 +69,7 @@ export function ImportPreviewPanel({ preview }: { preview: ImportPreview }) {
         const pnl = item.trade.status === "OPEN" ? item.trade.unrealized_pl : item.trade.realized_pl;
 
         return (
-          <Card key={`${item.trade.ticker}-${index}`} style={{ marginBottom: "6px", borderColor: `${color}30` }}>
+          <Card key={item.preview_id} style={{ marginBottom: "6px", borderColor: `${color}30` }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center" }}>
               <div>
                 <div style={{ fontSize: "13px", fontWeight: 700, color: DESIGN.bright }}>
@@ -89,6 +89,11 @@ export function ImportPreviewPanel({ preview }: { preview: ImportPreview }) {
             </div>
 
             <div style={{ fontSize: "11px", color: DESIGN.muted, marginTop: "8px" }}>{item.reason}</div>
+            {item.matchStatus === "conflict" && item.conflict_candidates.length > 0 && (
+              <div style={{ fontSize: "11px", color: DESIGN.yellow, marginTop: "6px" }}>
+                Candidate existing trades: {item.conflict_candidates.join(", ")}
+              </div>
+            )}
           </Card>
         );
       })}

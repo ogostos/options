@@ -235,9 +235,11 @@ export interface ParsedIBStatement {
 }
 
 export interface ImportPreviewTrade {
+  preview_id: string;
   trade: TradeInput;
   matchStatus: "match" | "new" | "conflict";
   matchedTradeId: number | null;
+  conflict_candidates: number[];
   reason: string;
 }
 

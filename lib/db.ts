@@ -188,6 +188,96 @@ function hasSymbolOverlap(a: string[], b: string[]) {
   return b.some((item) => set.has(item));
 }
 
+function sortUniqueSymbols(symbols: string[]) {
+  return [...new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))].sort();
+}
+
+function numbersAlmostEqual(a: number | null | undefined, b: number | null | undefined, tolerance = 0.01) {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return Math.abs(a - b) <= tolerance;
+}
+
+function textEqual(a: string | null | undefined, b: string | null | undefined) {
+  return (a ?? "").trim() === (b ?? "").trim();
+}
+
+function tradeMatchesImportPayload(existing: Trade, incoming: TradeInput) {
+  const incomingSymbols = sortUniqueSymbols(incoming.ib_symbols ?? []);
+  const existingSymbols = sortUniqueSymbols(existing.ib_symbols);
+
+  return (
+    existing.ticker === incoming.ticker.toUpperCase() &&
+    existing.entry_date === incoming.entry_date &&
+    existing.status === incoming.status &&
+    textEqual(existing.strategy, incoming.strategy) &&
+    textEqual(existing.legs, incoming.legs) &&
+    existing.direction === incoming.direction &&
+    textEqual(existing.exit_date, incoming.exit_date ?? null) &&
+    textEqual(existing.expiry_date, incoming.expiry_date ?? null) &&
+    numbersAlmostEqual(existing.cost_basis, incoming.cost_basis) &&
+    numbersAlmostEqual(existing.max_risk, incoming.max_risk) &&
+    numbersAlmostEqual(existing.max_profit, incoming.max_profit ?? null) &&
+    numbersAlmostEqual(existing.realized_pl, incoming.realized_pl ?? null) &&
+    numbersAlmostEqual(existing.unrealized_pl, incoming.unrealized_pl ?? null) &&
+    numbersAlmostEqual(existing.return_pct, incoming.return_pct ?? null) &&
+    numbersAlmostEqual(existing.commissions, incoming.commissions ?? 0) &&
+    existing.contracts === (incoming.contracts ?? 1) &&
+    numbersAlmostEqual(existing.breakeven, incoming.breakeven ?? null) &&
+    numbersAlmostEqual(existing.strike_long, incoming.strike_long ?? null) &&
+    numbersAlmostEqual(existing.strike_short, incoming.strike_short ?? null) &&
+    numbersAlmostEqual(existing.close_price_long, incoming.close_price_long ?? null) &&
+    numbersAlmostEqual(existing.close_price_short, incoming.close_price_short ?? null) &&
+    existingSymbols.join("|") === incomingSymbols.join("|")
+  );
+}
+
+function buildImportUpdatePayload(existing: Trade, incoming: TradeInput): Partial<TradeInput> {
+  const mergedSymbols = sortUniqueSymbols([...(existing.ib_symbols ?? []), ...(incoming.ib_symbols ?? [])]);
+
+  return {
+    ticker: incoming.ticker.toUpperCase(),
+    strategy: incoming.strategy || existing.strategy,
+    legs: incoming.legs || existing.legs,
+    direction: incoming.direction || existing.direction,
+    entry_date: incoming.entry_date || existing.entry_date,
+    exit_date: incoming.exit_date ?? existing.exit_date,
+    expiry_date: incoming.expiry_date ?? existing.expiry_date,
+    status: incoming.status ?? existing.status,
+    position_type: existing.position_type,
+    cost_basis: incoming.cost_basis ?? existing.cost_basis,
+    max_risk: incoming.max_risk ?? existing.max_risk,
+    max_profit: incoming.max_profit ?? existing.max_profit,
+    realized_pl: incoming.realized_pl ?? existing.realized_pl,
+    unrealized_pl: incoming.unrealized_pl ?? existing.unrealized_pl,
+    return_pct: incoming.return_pct ?? existing.return_pct,
+    commissions: incoming.commissions ?? existing.commissions,
+    contracts: incoming.contracts ?? existing.contracts,
+    breakeven: incoming.breakeven ?? existing.breakeven,
+    strike_long: incoming.strike_long ?? existing.strike_long,
+    strike_short: incoming.strike_short ?? existing.strike_short,
+    close_price_long: incoming.close_price_long ?? existing.close_price_long,
+    close_price_short: incoming.close_price_short ?? existing.close_price_short,
+    source: existing.source,
+    ib_symbols: mergedSymbols,
+  };
+}
+
+export async function applyImportPayloadToTradeId(tradeId: number, payload: TradeInput): Promise<Trade> {
+  await ensureDb();
+  const existing = await getTradeById(tradeId);
+  if (!existing) {
+    throw new Error(`Trade ${tradeId} not found for import resolution`);
+  }
+
+  const updatePayload = buildImportUpdatePayload(existing, payload);
+  const updated = await updateTrade(tradeId, updatePayload);
+  if (!updated) {
+    throw new Error(`Failed to update trade ${tradeId} during import resolution`);
+  }
+  return updated;
+}
+
 function assertDatabaseConfigured() {
   if (!process.env.DATABASE_URL && !process.env.POSTGRES_URL && !process.env.POSTGRES_PRISMA_URL) {
     throw new Error("DATABASE_URL is not configured. Add Vercel Postgres connection string to run this dashboard.");
@@ -634,7 +724,7 @@ export async function updateTrade(id: number, payload: Partial<TradeInput>): Pro
   return result.rowCount ? mapTradeRow(result.rows[0]) : null;
 }
 
-export async function upsertTradeByImportMatch(payload: TradeInput): Promise<{ trade: Trade; action: "created" | "updated" }> {
+export async function upsertTradeByImportMatch(payload: TradeInput): Promise<{ trade: Trade; action: "created" | "updated" | "unchanged" }> {
   await ensureDb();
 
   const existing = await listTrades();
@@ -645,10 +735,14 @@ export async function upsertTradeByImportMatch(payload: TradeInput): Promise<{ t
   });
 
   if (match) {
-    const updated = await updateTrade(match.id, payload);
-    if (!updated) {
-      throw new Error("Failed to update trade during import merge");
+    const existingClosed = match.status !== "OPEN";
+    const incomingClosed = payload.status !== "OPEN";
+
+    if (existingClosed && incomingClosed && tradeMatchesImportPayload(match, payload)) {
+      return { trade: match, action: "unchanged" };
     }
+
+    const updated = await applyImportPayloadToTradeId(match.id, payload);
     return { trade: updated, action: "updated" };
   }
 
