@@ -1,5 +1,6 @@
 import { Card, Pill } from "@/components/ui/primitives";
 import { computeDTE, DESIGN, formatMoney } from "@/lib/design";
+import { SCORING_EXCLUDED_RULES } from "@/lib/scoring";
 import type { PortfolioRuleChecks, RuleCheckResult, Trade } from "@/lib/types";
 
 function byId(openTrades: Trade[]) {
@@ -31,7 +32,7 @@ export function RuleCheck({
         : `${(portfolio.totalRiskPct / 5).toFixed(1)}x over limit. Max allowed: ${formatMoney(nav * 0.05)}`,
     },
     {
-      rule: "#8 Max 3 Open Positions",
+      rule: "Position Count (max 3 open positions)",
       pass: portfolio.positionCountPass,
       value: `${portfolio.positionCount} positions open`,
       detail: portfolio.positionCountPass
@@ -53,6 +54,20 @@ export function RuleCheck({
       <div style={{ fontSize: "12px", color: DESIGN.muted, marginBottom: "12px", lineHeight: 1.5 }}>
         Each open position is scored against your discipline rules. Red = violation, green = compliant.
       </div>
+      {SCORING_EXCLUDED_RULES.length > 0 && (
+        <Card style={{ marginBottom: "10px", borderColor: `${DESIGN.yellow}25`, background: `${DESIGN.yellow}06` }}>
+          <div style={{ fontSize: "10px", color: DESIGN.yellow, fontWeight: 700, marginBottom: "4px", textTransform: "uppercase" }}>
+            Excluded From Scoring
+          </div>
+          <div style={{ display: "grid", gap: "4px" }}>
+            {SCORING_EXCLUDED_RULES.map((rule) => (
+              <div key={rule.ruleNumber} style={{ fontSize: "11px", color: DESIGN.text, lineHeight: 1.4 }}>
+                #{rule.ruleNumber} {rule.title}: <span style={{ color: DESIGN.muted }}>{rule.reason}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <Card
         style={{

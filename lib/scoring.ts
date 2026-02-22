@@ -7,6 +7,14 @@ import type {
   Trade,
 } from "@/lib/types";
 
+export const SCORING_EXCLUDED_RULES = [
+  {
+    ruleNumber: 9,
+    title: "Win Protocol",
+    reason: "Requires reliable live multi-leg option mark/unrealized P&L, which is not available in current setup.",
+  },
+] as const;
+
 function pct(value: number, base: number): number {
   if (!base) return 0;
   return (value / base) * 100;
@@ -83,16 +91,6 @@ function toDetails(openTrade: Trade, allTrades: Trade[], account: AccountSnapsho
         openTrade.direction !== "Bearish"
           ? "Direction aligned"
           : "Bearish direction violates profile",
-    },
-    {
-      ruleNumber: 9,
-      title: "Win Protocol",
-      severity: "info",
-      pass: (openTrade.unrealized_pl ?? 0) > openTrade.max_risk * 0.3,
-      detail:
-        (openTrade.unrealized_pl ?? 0) > openTrade.max_risk * 0.3
-          ? "At/above +30% trigger"
-          : "Not yet at +30% trigger",
     },
     {
       ruleNumber: 10,
