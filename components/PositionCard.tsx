@@ -6,10 +6,43 @@ import { BreakevenBar } from "@/components/BreakevenBar";
 import { Card, Dots, Pill } from "@/components/ui/primitives";
 import { computeDTE, DESIGN, formatMoney, formatSigned } from "@/lib/design";
 import { buildPositionGuidance } from "@/lib/live-guidance";
+import {
+  classifyIronCondorPriceZone,
+  estimateIronCondorPnLAtExpiry,
+  getIronCondorZone,
+} from "@/lib/options-zones";
 import type { Trade } from "@/lib/types";
 
 function calcRisk(position: Trade, price: number | null) {
-  if (!price || !position.expiry_date || position.breakeven == null) {
+  if (!price || !position.expiry_date) {
+    return { level: 3, label: "—", color: DESIGN.muted };
+  }
+
+  const condor = getIronCondorZone({
+    strategy: position.strategy,
+    legs: position.legs,
+    breakeven: position.breakeven,
+    maxProfit: position.max_profit,
+    contracts: position.contracts,
+  });
+
+  if (condor) {
+    const dte = computeDTE(position.expiry_date);
+    const zone = classifyIronCondorPriceZone(price, condor);
+
+    if (zone === "max_profit_core") {
+      return { level: 1, label: "SAFE", color: DESIGN.green };
+    }
+    if (zone === "profit_low" || zone === "profit_high") {
+      return { level: dte > 3 ? 1 : 2, label: "SAFE", color: DESIGN.green };
+    }
+    if (zone === "recover_low" || zone === "recover_high") {
+      return { level: dte > 5 ? 3 : 4, label: dte > 5 ? "CAUTION" : "AT RISK", color: dte > 5 ? DESIGN.yellow : "#f97316" };
+    }
+    return { level: 5, label: "CRITICAL", color: "#ef4444" };
+  }
+
+  if (position.breakeven == null) {
     return { level: 3, label: "—", color: DESIGN.muted };
   }
 
@@ -27,6 +60,17 @@ function calcRisk(position: Trade, price: number | null) {
 
 function estimateSpreadPnL(position: Trade, price: number | null) {
   if (price == null || position.strike_long == null) return null;
+
+  const condor = getIronCondorZone({
+    strategy: position.strategy,
+    legs: position.legs,
+    breakeven: position.breakeven,
+    maxProfit: position.max_profit,
+    contracts: position.contracts,
+  });
+  if (condor) {
+    return estimateIronCondorPnLAtExpiry(price, condor, position.contracts);
+  }
 
   if (position.strategy === "Long Call" || position.strategy === "Long Call (ex-diagonal)") {
     return Math.max(0, (price - position.strike_long) * 100) - position.cost_basis;
@@ -179,6 +223,10 @@ export function PositionCard({
 
       <BreakevenBar
         price={price}
+        strategy={position.strategy}
+        legs={position.legs}
+        contracts={position.contracts}
+        maxProfit={position.max_profit}
         breakeven={position.breakeven}
         stopLoss={position.stop_loss}
         strikeLong={position.strike_long}
