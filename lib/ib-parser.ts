@@ -16,10 +16,32 @@ const MONTHS: Record<string, string> = {
   DEC: "12",
 };
 
+const OPTION_SYMBOL_PATTERN = /([A-Z.]+\s+\d{2}[A-Z]{3}\d{2}\s+[\d.]+\s+[CP])$/i;
+
 function parseNumber(raw: string): number {
   const normalized = raw.replace(/,/g, "").trim();
   const value = Number(normalized);
   return Number.isFinite(value) ? value : 0;
+}
+
+function isNumericToken(value: string): boolean {
+  return /^-?[\d,]+(?:\.\d+)?$/.test(value.trim());
+}
+
+function normalizeLine(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function extractOptionSymbol(raw: string): string | null {
+  const normalized = normalizeLine(raw)
+    .replace(/^Equity and Index OptionsUSD/i, "")
+    .replace(/^Equity and Index Options/i, "")
+    .replace(/^OptionsUSD/i, "")
+    .replace(/^Options/i, "")
+    .trim();
+  const match = normalized.match(OPTION_SYMBOL_PATTERN);
+  if (!match) return null;
+  return match[1].toUpperCase();
 }
 
 function parseDateCode(code: string): string | null {
@@ -59,9 +81,22 @@ export function parseIBSymbol(symbol: string): {
 }
 
 function extractSection(lines: string[], startPatterns: string[], stopPatterns: string[]): string[] {
-  const start = lines.findIndex((line) =>
-    startPatterns.some((pattern) => line.toLowerCase().includes(pattern.toLowerCase())),
-  );
+  const startLower = startPatterns.map((pattern) => pattern.toLowerCase());
+
+  let exactStart = -1;
+  let fuzzyStart = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    const lower = lines[i].toLowerCase();
+    if (exactStart < 0 && startLower.some((pattern) => lower === pattern)) {
+      exactStart = i;
+      break;
+    }
+    if (fuzzyStart < 0 && startLower.some((pattern) => lower.includes(pattern))) {
+      fuzzyStart = i;
+    }
+  }
+
+  const start = exactStart >= 0 ? exactStart : fuzzyStart;
   if (start < 0) return [];
 
   let end = lines.length;
@@ -127,8 +162,9 @@ function parseNetAssetValue(lines: string[]): Partial<AccountSnapshot> {
 function parseTradesSection(lines: string[]): ParsedIBExecution[] {
   const executions: ParsedIBExecution[] = [];
 
+  // Handle inline rows when the PDF extractor preserves table columns on one line.
   for (const rawLine of lines) {
-    const line = rawLine.trim().replace(/\s+/g, " ");
+    const line = normalizeLine(rawLine);
     if (!line || /^total/i.test(line)) continue;
 
     const match = line.match(
@@ -158,14 +194,59 @@ function parseTradesSection(lines: string[]): ParsedIBExecution[] {
     void amountRaw;
   }
 
-  return executions;
+  // Handle multi-line row format (common in IB statements).
+  for (let i = 0; i < lines.length - 10; i += 1) {
+    const symbol = extractOptionSymbol(lines[i]);
+    if (!symbol || /^total\b/i.test(lines[i])) continue;
+
+    const dateTimeRaw = normalizeLine(lines[i + 1] ?? "");
+    const dateTimeMatch = dateTimeRaw.match(/^(\d{4}-\d{2}-\d{2}),\s*(\d{2}:\d{2}:\d{2})$/);
+    if (!dateTimeMatch) continue;
+
+    const qtyRaw = normalizeLine(lines[i + 2] ?? "");
+    const tPriceRaw = normalizeLine(lines[i + 3] ?? "");
+    const proceedsRaw = normalizeLine(lines[i + 5] ?? "");
+    const commissionRaw = normalizeLine(lines[i + 6] ?? "");
+
+    if (!/^-?\d+(?:\.\d+)?$/.test(qtyRaw)) continue;
+    if (!isNumericToken(tPriceRaw) || !isNumericToken(commissionRaw)) continue;
+
+    const parsed = parseIBSymbol(symbol);
+    const quantity = Number(qtyRaw);
+    const [, datePart, timePart] = dateTimeMatch;
+
+    executions.push({
+      raw: symbol,
+      symbol,
+      ticker: parsed.ticker,
+      expiry: parsed.expiry,
+      strike: parsed.strike,
+      optionType: parsed.optionType,
+      side: quantity >= 0 ? "BUY" : "SELL",
+      quantity,
+      price: parseNumber(tPriceRaw),
+      commission: parseNumber(commissionRaw),
+      timestamp: `${datePart}T${timePart}`,
+    });
+
+    void proceedsRaw;
+  }
+
+  const dedup = new Map<string, ParsedIBExecution>();
+  for (const row of executions) {
+    const key = [row.symbol, row.timestamp ?? "", row.quantity, row.price.toFixed(6), row.commission.toFixed(6)].join("|");
+    dedup.set(key, row);
+  }
+
+  return [...dedup.values()];
 }
 
 function parseOpenPositionsSection(lines: string[]): ParsedIBOpenPosition[] {
   const rows: ParsedIBOpenPosition[] = [];
 
+  // Handle inline rows when available.
   for (const rawLine of lines) {
-    const line = rawLine.trim().replace(/\s+/g, " ");
+    const line = normalizeLine(rawLine);
     if (!line || /^total/i.test(line)) continue;
 
     const match = line.match(
@@ -191,14 +272,53 @@ function parseOpenPositionsSection(lines: string[]): ParsedIBOpenPosition[] {
     });
   }
 
-  return rows;
+  // Handle multi-line row format used by IB table extraction.
+  for (let i = 0; i < lines.length - 7; i += 1) {
+    const symbol = extractOptionSymbol(lines[i]);
+    if (!symbol || /^total\b/i.test(lines[i])) continue;
+
+    const openField = normalizeLine(lines[i + 1] ?? "");
+    const qtyRaw = normalizeLine(lines[i + 2] ?? "");
+    const multRaw = normalizeLine(lines[i + 3] ?? "");
+    const avgRaw = normalizeLine(lines[i + 4] ?? "");
+    const costRaw = normalizeLine(lines[i + 5] ?? "");
+    const closeRaw = normalizeLine(lines[i + 6] ?? "");
+
+    if (openField !== "-") continue;
+    if (!/^-?\d+(?:\.\d+)?$/.test(qtyRaw)) continue;
+    if (!/^\d+$/.test(multRaw)) continue;
+    if (!isNumericToken(avgRaw) || !isNumericToken(costRaw) || !isNumericToken(closeRaw)) continue;
+
+    const parsed = parseIBSymbol(symbol);
+    rows.push({
+      raw: symbol,
+      symbol,
+      ticker: parsed.ticker,
+      expiry: parsed.expiry,
+      strike: parsed.strike,
+      optionType: parsed.optionType,
+      quantity: Number(qtyRaw),
+      avgPrice: parseNumber(avgRaw),
+      costBasis: parseNumber(costRaw),
+      closePrice: parseNumber(closeRaw),
+    });
+  }
+
+  const dedup = new Map<string, ParsedIBOpenPosition>();
+  for (const row of rows) {
+    const key = [row.symbol, row.quantity, row.avgPrice.toFixed(6), row.costBasis.toFixed(2), row.closePrice.toFixed(4)].join("|");
+    dedup.set(key, row);
+  }
+
+  return [...dedup.values()];
 }
 
 function parseRealizedSummary(lines: string[]): ParsedIBSummarySymbol[] {
   const rows: ParsedIBSummarySymbol[] = [];
 
+  // Handle inline rows when the extractor keeps each row in one line.
   for (const rawLine of lines) {
-    const line = rawLine.trim().replace(/\s+/g, " ");
+    const line = normalizeLine(rawLine);
     if (!line || /^total/i.test(line)) continue;
 
     const symbolMatch = line.match(/^([A-Z.]+\s+\d{2}[A-Z]{3}\d{2}\s+[\d.]+\s+[CP])\s+(.+)$/i);
@@ -220,7 +340,43 @@ function parseRealizedSummary(lines: string[]): ParsedIBSummarySymbol[] {
     });
   }
 
-  return rows;
+  // Handle multi-line row format where each numeric column is on its own line.
+  // Expected numeric sequence after symbol:
+  // cost_adj, st_profit, st_loss, lt_profit, lt_loss, realized_total,
+  // unrealized_st_profit, unrealized_st_loss, unrealized_lt_profit, unrealized_lt_loss,
+  // unrealized_total, total
+  for (let i = 0; i < lines.length; i += 1) {
+    const symbol = extractOptionSymbol(lines[i]);
+    if (!symbol || /^total\b/i.test(lines[i])) continue;
+
+    const numeric: string[] = [];
+    for (let j = i + 1; j < Math.min(lines.length, i + 24) && numeric.length < 12; j += 1) {
+      const line = normalizeLine(lines[j]);
+      if (!line) continue;
+      if (extractOptionSymbol(line)) break;
+      if (/^activity statement\b/i.test(line) || /^page:\s*\d+/i.test(line)) continue;
+      if (/^(symbol|code|realized|unrealized|cost adj\.?|s\/t profit|s\/t loss|l\/t profit|l\/t loss|total)$/i.test(line)) continue;
+      if (isNumericToken(line)) {
+        numeric.push(line);
+      }
+    }
+
+    if (numeric.length >= 12) {
+      rows.push({
+        symbol,
+        realizedPl: parseNumber(numeric[5]),
+        unrealizedPl: parseNumber(numeric[10]),
+        totalPl: parseNumber(numeric[11]),
+      });
+    }
+  }
+
+  const bySymbol = new Map<string, ParsedIBSummarySymbol>();
+  for (const row of rows) {
+    bySymbol.set(row.symbol, row);
+  }
+
+  return [...bySymbol.values()];
 }
 
 function groupDetectedTrades(
