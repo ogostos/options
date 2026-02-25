@@ -6,86 +6,26 @@ import { BreakevenBar } from "@/components/BreakevenBar";
 import { Card, Dots, Pill } from "@/components/ui/primitives";
 import { computeDTE, DESIGN, formatMoney, formatSigned } from "@/lib/design";
 import { buildPositionGuidance } from "@/lib/live-guidance";
-import {
-  classifyIronCondorPriceZone,
-  estimateIronCondorPnLAtExpiry,
-  getIronCondorZone,
-} from "@/lib/options-zones";
+import { buildLiveOptionSnapshot, getRiskSnapshot, type OptionQuoteMap } from "@/lib/live-position-metrics";
 import type { Trade } from "@/lib/types";
 
-function calcRisk(position: Trade, price: number | null) {
-  if (!price || !position.expiry_date) {
-    return { level: 3, label: "—", color: DESIGN.muted };
-  }
-
-  const condor = getIronCondorZone({
-    strategy: position.strategy,
-    legs: position.legs,
-    breakeven: position.breakeven,
-    maxProfit: position.max_profit,
-    contracts: position.contracts,
-  });
-
-  if (condor) {
-    const dte = computeDTE(position.expiry_date);
-    const zone = classifyIronCondorPriceZone(price, condor);
-
-    if (zone === "max_profit_core") {
-      return { level: 1, label: "SAFE", color: DESIGN.green };
-    }
-    if (zone === "profit_low" || zone === "profit_high") {
-      return { level: dte > 3 ? 1 : 2, label: "SAFE", color: DESIGN.green };
-    }
-    if (zone === "recover_low" || zone === "recover_high") {
-      return { level: dte > 5 ? 3 : 4, label: dte > 5 ? "CAUTION" : "AT RISK", color: dte > 5 ? DESIGN.yellow : "#f97316" };
-    }
-    return { level: 5, label: "CRITICAL", color: "#ef4444" };
-  }
-
-  if (position.breakeven == null) {
-    return { level: 3, label: "—", color: DESIGN.muted };
-  }
-
-  const dte = computeDTE(position.expiry_date);
-  const be = position.breakeven;
-  const dist = ((be - price) / price) * 100;
-  const absDist = Math.abs(dist);
-
-  if (price >= be) return { level: 1, label: "SAFE", color: DESIGN.green };
-  if (absDist < 3 && dte > 5) return { level: 2, label: "NEAR", color: DESIGN.green };
-  if (absDist < 5 && dte > 3) return { level: 3, label: "CAUTION", color: DESIGN.yellow };
-  if (absDist < 10 && dte > 2) return { level: 4, label: "AT RISK", color: "#f97316" };
-  return { level: 5, label: "CRITICAL", color: "#ef4444" };
+function isCreditStrategy(strategy: string) {
+  return strategy === "Bull Put Spread" || strategy === "Bear Call Spread" || strategy === "Iron Condor";
 }
 
-function estimateSpreadPnL(position: Trade, price: number | null) {
-  if (price == null || position.strike_long == null) return null;
+function urgencyTitle(level: number | null) {
+  const value = level ?? 0;
+  if (value <= 1) return "Urgency 1/5: low pressure, time cushion.";
+  if (value === 2) return "Urgency 2/5: monitor, no immediate pressure.";
+  if (value === 3) return "Urgency 3/5: active management required.";
+  if (value === 4) return "Urgency 4/5: elevated pressure, manage tightly.";
+  return "Urgency 5/5: highest pressure, near-term decisions required.";
+}
 
-  const condor = getIronCondorZone({
-    strategy: position.strategy,
-    legs: position.legs,
-    breakeven: position.breakeven,
-    maxProfit: position.max_profit,
-    contracts: position.contracts,
-  });
-  if (condor) {
-    return estimateIronCondorPnLAtExpiry(price, condor, position.contracts);
-  }
-
-  if (position.strategy === "Long Call" || position.strategy === "Long Call (ex-diagonal)") {
-    return Math.max(0, (price - position.strike_long) * 100) - position.cost_basis;
-  }
-
-  if (position.strategy === "Long Put") {
-    return Math.max(0, (position.strike_long - price) * 100) - position.cost_basis;
-  }
-
-  if (position.strike_short == null) return null;
-
-  const width = Math.abs(position.strike_short - position.strike_long);
-  const intrinsic = Math.max(0, price - position.strike_long) * 100;
-  const maxValue = width * 100;
-  return Math.min(maxValue, intrinsic) - position.cost_basis;
+function safeText(value: string | null | undefined, fallback: string) {
+  if (value == null) return fallback;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
 }
 
 function catalystColor(catalyst: string) {
@@ -147,22 +87,48 @@ function playbookText(position: Trade, playbook: "conservative" | "balanced" | "
 export function PositionCard({
   position,
   price,
+  optionQuotes,
   expanded,
   onToggle,
 }: {
   position: Trade;
   price: number | null;
+  optionQuotes: OptionQuoteMap;
   expanded: boolean;
   onToggle: () => void;
 }) {
   const [detailTab, setDetailTab] = useState<"action" | "plan">("action");
   const dte = computeDTE(position.expiry_date);
   const urgency = position.urgency ?? 1;
-  const risk = calcRisk(position, price);
-  const currentValue = estimateSpreadPnL(position, price) ?? position.unrealized_pl;
+  const risk = getRiskSnapshot(position, price);
+  const live = buildLiveOptionSnapshot(position, optionQuotes);
   const guidance = buildPositionGuidance(position, price);
   const guidanceTone = toneByLevel(guidance.level);
   const recommendedPlan = playbookText(position, guidance.recommendedPlaybook);
+  const entryPerContract =
+    position.contracts > 0 ? position.cost_basis / (position.contracts * 100) : null;
+  const profitCaptureColor =
+    live.profitCapturePct == null
+      ? DESIGN.muted
+      : live.profitCapturePct >= 40 && live.profitCapturePct <= 70
+        ? DESIGN.green
+        : live.profitCapturePct > 70
+          ? DESIGN.yellow
+          : DESIGN.blue;
+  const holdAdviceText = safeText(
+    position.hold_advice,
+    safeText(position.notes, "No original hold plan was saved for this trade."),
+  );
+  const exitTriggerText = safeText(
+    position.exit_trigger,
+    "No explicit exit trigger was saved. Use stop and breakeven rules from Action Guide.",
+  );
+  const bestCaseText = safeText(
+    position.best_case,
+    position.max_profit != null
+      ? `Target max profit potential is ${formatMoney(position.max_profit)}.`
+      : "No explicit best-case scenario was saved.",
+  );
 
   return (
     <div
@@ -195,15 +161,36 @@ export function PositionCard({
           >
             {dte} DTE
           </Pill>
-          <Dots level={urgency} />
+          <span title={urgencyTitle(urgency)} style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+            <Dots level={urgency} />
+          </span>
         </div>
 
         <div style={{ display: "flex", gap: "16px", fontSize: "12px", fontFamily: DESIGN.mono }}>
-          {price != null && <span style={{ color: DESIGN.text }}>@{price.toFixed(2)}</span>}
-          <span style={{ color: risk.color, fontWeight: 600 }}>{risk.label}</span>
-          {currentValue != null && (
-            <span style={{ color: currentValue >= 0 ? DESIGN.green : DESIGN.red, fontWeight: 700 }}>
-              {formatSigned(currentValue)}
+          {price != null && (
+            <span style={{ color: DESIGN.text }} title="Current underlying stock price">
+              Current: ${price.toFixed(2)}
+            </span>
+          )}
+          <span style={{ color: risk.color, fontWeight: 600 }} title={risk.detail}>
+            {risk.label}
+          </span>
+          {live.livePnl != null && (
+            <span
+              style={{ color: live.livePnl >= 0 ? DESIGN.green : DESIGN.red, fontWeight: 700 }}
+              title="Live option P/L from option mark quotes"
+            >
+              {formatSigned(live.livePnl)}
+            </span>
+          )}
+          {live.livePnl == null && live.markValue != null && (
+            <span style={{ color: DESIGN.blue, fontWeight: 700 }} title="Live option position mark value">
+              Mark {formatMoney(live.markValue)}
+            </span>
+          )}
+          {live.livePnl == null && live.markValue == null && (
+            <span style={{ color: DESIGN.muted, fontWeight: 700 }} title="Needs option quote data for all legs">
+              Live P/L —
             </span>
           )}
         </div>
@@ -211,15 +198,68 @@ export function PositionCard({
 
       <div style={{ display: "flex", gap: "16px", marginTop: "8px", fontSize: "11px", color: DESIGN.muted, flexWrap: "wrap" }}>
         <span>{position.legs}</span>
-        <span>Risk: {formatMoney(position.max_risk)}</span>
-        <span>Max: {position.max_profit != null ? formatMoney(position.max_profit) : "∞"}</span>
+        <span>
+          Risk: <span style={{ color: DESIGN.red, fontFamily: DESIGN.mono, fontWeight: 700 }}>{formatMoney(position.max_risk)}</span>
+        </span>
+        <span>
+          Max Profit:{" "}
+          <span style={{ color: DESIGN.green, fontFamily: DESIGN.mono, fontWeight: 700 }}>
+            {position.max_profit != null ? formatMoney(position.max_profit) : "∞"}
+          </span>
+        </span>
+        <span title="Net position entry cost/credit per contract">
+          Entry {isCreditStrategy(position.strategy) ? "Credit" : "Debit"}:{" "}
+          <span style={{ color: DESIGN.text, fontFamily: DESIGN.mono, fontWeight: 700 }}>
+            {entryPerContract != null ? `$${entryPerContract.toFixed(2)}/contract` : "—"}
+          </span>
+        </span>
+        {(position.close_price_long != null || position.close_price_short != null) && (
+          <span title="Saved leg prices from your trade data">
+            Leg Px:{" "}
+            <span style={{ color: DESIGN.text, fontFamily: DESIGN.mono, fontWeight: 700 }}>
+              {position.close_price_long != null ? `L ${position.close_price_long.toFixed(2)}` : "L —"} /{" "}
+              {position.close_price_short != null ? `S ${position.close_price_short.toFixed(2)}` : "S —"}
+            </span>
+          </span>
+        )}
         <span>θ: {position.theta_per_day ?? "—"}/day</span>
+        {live.profitCapturePct != null && (
+          <span title="Current live P/L as % of max profit target">
+            Capture:{" "}
+            <span style={{ color: profitCaptureColor, fontFamily: DESIGN.mono, fontWeight: 700 }}>
+              {live.profitCapturePct.toFixed(1)}%
+            </span>
+          </span>
+        )}
         {position.catalyst && (
           <Pill color={catalystColor(position.catalyst)} background={`${catalystColor(position.catalyst)}15`}>
             {position.catalyst}
           </Pill>
         )}
       </div>
+
+      {live.legs.length > 0 && (
+        <div style={{ display: "flex", gap: "6px", marginTop: "8px", flexWrap: "wrap" }}>
+          {live.legs.map((leg) => (
+            <span
+              key={leg.symbol}
+              title={leg.symbol}
+              style={{
+                fontSize: "10px",
+                fontFamily: DESIGN.mono,
+                color: leg.side === "LONG" ? DESIGN.green : DESIGN.red,
+                background: "rgba(255,255,255,0.02)",
+                border: `1px solid ${DESIGN.cardBorder}`,
+                borderRadius: "4px",
+                padding: "2px 6px",
+              }}
+            >
+              {leg.side === "LONG" ? "B" : "S"} {leg.strike}
+              {leg.optionType} {leg.mark != null ? `@ ${leg.mark.toFixed(2)}` : "@ —"}
+            </span>
+          ))}
+        </div>
+      )}
 
       <BreakevenBar
         price={price}
@@ -308,6 +348,68 @@ export function PositionCard({
                 <div style={{ fontSize: "13px", fontWeight: 700, color: DESIGN.bright, marginBottom: "4px" }}>{guidance.title}</div>
                 <div style={{ fontSize: "11px", color: DESIGN.text, lineHeight: 1.5 }}>{guidance.summary}</div>
               </div>
+
+              <Card style={{ padding: "10px 12px", borderRadius: "6px", marginBottom: "10px" }}>
+                <div style={{ fontSize: "10px", color: DESIGN.blue, fontWeight: 700, textTransform: "uppercase", marginBottom: "6px" }}>
+                  Live Position Readout
+                </div>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+                    gap: "8px",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, marginBottom: "2px", textTransform: "uppercase" }}>Live P/L</div>
+                    <div
+                      style={{
+                        fontFamily: DESIGN.mono,
+                        fontSize: "13px",
+                        fontWeight: 700,
+                        color:
+                          live.livePnl == null
+                            ? DESIGN.muted
+                            : live.livePnl >= 0
+                              ? DESIGN.green
+                              : DESIGN.red,
+                      }}
+                    >
+                      {live.livePnl != null ? formatSigned(live.livePnl) : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, marginBottom: "2px", textTransform: "uppercase" }}>Live Mark</div>
+                    <div style={{ fontFamily: DESIGN.mono, fontSize: "13px", fontWeight: 700, color: DESIGN.text }}>
+                      {live.markValue != null ? formatMoney(live.markValue) : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, marginBottom: "2px", textTransform: "uppercase" }}>Progress</div>
+                    <div
+                      style={{
+                        fontFamily: DESIGN.mono,
+                        fontSize: "13px",
+                        fontWeight: 700,
+                        color:
+                          live.profitCapturePct != null
+                            ? live.profitCapturePct >= 40 && live.profitCapturePct <= 70
+                              ? DESIGN.green
+                              : DESIGN.yellow
+                            : live.riskConsumedPct != null
+                              ? DESIGN.red
+                              : DESIGN.muted,
+                      }}
+                    >
+                      {live.profitCapturePct != null
+                        ? `${live.profitCapturePct.toFixed(1)}% of max`
+                        : live.riskConsumedPct != null
+                          ? `${live.riskConsumedPct.toFixed(1)}% risk used`
+                          : "—"}
+                    </div>
+                  </div>
+                </div>
+              </Card>
 
               <div
                 style={{
@@ -492,7 +594,7 @@ export function PositionCard({
                 >
                   Hold Advice
                 </div>
-                <div style={{ fontSize: "12px", color: DESIGN.text, lineHeight: 1.5 }}>{position.hold_advice}</div>
+                <div style={{ fontSize: "12px", color: DESIGN.text, lineHeight: 1.5 }}>{holdAdviceText}</div>
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "10px" }}>
@@ -507,7 +609,7 @@ export function PositionCard({
                   <div style={{ fontSize: "10px", color: DESIGN.yellow, fontWeight: 700, marginBottom: "3px" }}>
                     EXIT TRIGGER
                   </div>
-                  <div style={{ fontSize: "11px", color: DESIGN.text, lineHeight: 1.4 }}>{position.exit_trigger}</div>
+                  <div style={{ fontSize: "11px", color: DESIGN.text, lineHeight: 1.4 }}>{exitTriggerText}</div>
                 </div>
                 <div
                   style={{
@@ -520,15 +622,30 @@ export function PositionCard({
                   <div style={{ fontSize: "10px", color: DESIGN.green, fontWeight: 700, marginBottom: "3px" }}>
                     BEST CASE
                   </div>
-                  <div style={{ fontSize: "11px", color: DESIGN.text, lineHeight: 1.4 }}>{position.best_case}</div>
+                  <div style={{ fontSize: "11px", color: DESIGN.text, lineHeight: 1.4 }}>{bestCaseText}</div>
                 </div>
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "6px" }}>
                 {[
-                  { key: "conservative", icon: "🛡", text: position.exit_conservative, color: DESIGN.blue },
-                  { key: "balanced", icon: "⚖️", text: position.exit_balanced, color: DESIGN.yellow },
-                  { key: "aggressive", icon: "🔥", text: position.exit_aggressive, color: DESIGN.red },
+                  {
+                    key: "conservative",
+                    label: "Conservative",
+                    text: safeText(position.exit_conservative, "No conservative plan saved."),
+                    color: DESIGN.blue,
+                  },
+                  {
+                    key: "balanced",
+                    label: "Balanced",
+                    text: safeText(position.exit_balanced, "No balanced plan saved."),
+                    color: DESIGN.yellow,
+                  },
+                  {
+                    key: "aggressive",
+                    label: "Aggressive",
+                    text: safeText(position.exit_aggressive, "No aggressive plan saved."),
+                    color: DESIGN.red,
+                  },
                 ].map((item) => (
                   <Card
                     key={item.key}
@@ -540,7 +657,7 @@ export function PositionCard({
                     }}
                   >
                     <div style={{ fontSize: "10px", fontWeight: 700, color: item.color, marginBottom: "3px" }}>
-                      {item.icon} {item.key.toUpperCase()}
+                      {item.label.toUpperCase()}
                     </div>
                     <div style={{ fontSize: "11px", color: DESIGN.text, lineHeight: 1.4 }}>{item.text}</div>
                   </Card>

@@ -1,16 +1,36 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { PositionCard } from "@/components/PositionCard";
 import { Card } from "@/components/ui/primitives";
-import { DESIGN, formatSigned } from "@/lib/design";
+import { DESIGN, computeDTE, formatSigned } from "@/lib/design";
+import { buildLiveOptionSnapshot, getRiskSnapshot, type OptionQuoteMap } from "@/lib/live-position-metrics";
 import type { StockPosition, Trade } from "@/lib/types";
 
 interface LiveTabProps {
   openPositions: Trade[];
   stocks: StockPosition[];
   assetFilter: "options" | "stocks" | "all";
+}
+
+type LiveSortKey =
+  | "dte"
+  | "urgency"
+  | "risk"
+  | "capital"
+  | "max_profit"
+  | "live_pnl"
+  | "ticker";
+type SortDirection = "asc" | "desc";
+
+const SORT_STORAGE_KEY = "options-dashboard.live-sort.v1";
+
+function compareNullableNumbers(a: number | null, b: number | null) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return a - b;
 }
 
 export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
@@ -20,6 +40,9 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
   const [loading, setLoading] = useState(false);
   const [lastFetch, setLastFetch] = useState<string | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
+  const [optionQuotes, setOptionQuotes] = useState<OptionQuoteMap>({});
+  const [sortKey, setSortKey] = useState<LiveSortKey>("dte");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
 
   const positions = useMemo(
     () => (assetFilter === "stocks" ? [] : openPositions),
@@ -27,17 +50,115 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
   );
   const stockRows = useMemo(() => (assetFilter === "options" ? [] : stocks), [assetFilter, stocks]);
 
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SORT_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { key?: LiveSortKey; direction?: SortDirection };
+      if (parsed.key) setSortKey(parsed.key);
+      if (parsed.direction) setSortDirection(parsed.direction);
+    } catch {
+      // ignore invalid persisted settings
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SORT_STORAGE_KEY,
+        JSON.stringify({ key: sortKey, direction: sortDirection }),
+      );
+    } catch {
+      // ignore storage failures
+    }
+  }, [sortDirection, sortKey]);
+
+  const getPrice = useCallback(
+    (ticker: string) => {
+      const manual = manualInputs[ticker];
+      if (manual != null && manual !== "") {
+        const num = Number(manual);
+        if (Number.isFinite(num) && num > 0) return num;
+      }
+      return prices[ticker] ?? null;
+    },
+    [manualInputs, prices],
+  );
+
+  const liveSnapshots = useMemo(() => {
+    const byId = new Map<
+      number,
+      {
+        riskLevel: number;
+        livePnl: number | null;
+      }
+    >();
+
+    for (const position of positions) {
+      const price = getPrice(position.ticker);
+      const risk = getRiskSnapshot(position, price);
+      const live = buildLiveOptionSnapshot(position, optionQuotes);
+      byId.set(position.id, {
+        riskLevel: risk.level,
+        livePnl: live.livePnl,
+      });
+    }
+    return byId;
+  }, [getPrice, optionQuotes, positions]);
+
+  const sortedPositions = useMemo(() => {
+    const list = [...positions];
+    list.sort((a, b) => {
+      let cmp = 0;
+
+      if (sortKey === "ticker") {
+        cmp = a.ticker.localeCompare(b.ticker);
+      } else if (sortKey === "dte") {
+        cmp = computeDTE(a.expiry_date) - computeDTE(b.expiry_date);
+      } else if (sortKey === "urgency") {
+        cmp = (a.urgency ?? 0) - (b.urgency ?? 0);
+      } else if (sortKey === "risk") {
+        const aRisk = liveSnapshots.get(a.id)?.riskLevel ?? 3;
+        const bRisk = liveSnapshots.get(b.id)?.riskLevel ?? 3;
+        cmp = aRisk - bRisk;
+      } else if (sortKey === "capital") {
+        cmp = a.max_risk - b.max_risk;
+      } else if (sortKey === "max_profit") {
+        cmp = compareNullableNumbers(a.max_profit, b.max_profit);
+      } else if (sortKey === "live_pnl") {
+        const aPnl = liveSnapshots.get(a.id)?.livePnl ?? null;
+        const bPnl = liveSnapshots.get(b.id)?.livePnl ?? null;
+        cmp = compareNullableNumbers(aPnl, bPnl);
+      }
+
+      return sortDirection === "asc" ? cmp : -cmp;
+    });
+    return list;
+  }, [liveSnapshots, positions, sortDirection, sortKey]);
+
   async function fetchPrices() {
     setLoading(true);
     try {
+      const tickers = [...new Set(positions.map((position) => position.ticker))];
+      const optionSymbols = [
+        ...new Set(
+          positions.flatMap((position) =>
+            (position.ib_symbols ?? [])
+              .map((symbol) => String(symbol).trim().toUpperCase())
+              .filter(Boolean),
+          ),
+        ),
+      ];
+
       const resp = await fetch("/api/prices", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tickers: positions.map((position) => position.ticker) }),
+        body: JSON.stringify({ tickers, optionSymbols }),
       });
 
       const data = (await resp.json()) as {
         prices?: Record<string, { price: number }>;
+        optionQuotes?: OptionQuoteMap;
       };
 
       if (data.prices) {
@@ -48,8 +169,13 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
           }
         }
         setPrices((prev) => ({ ...prev, ...next }));
-        setLastFetch(new Date().toISOString());
       }
+
+      if (data.optionQuotes) {
+        setOptionQuotes((prev) => ({ ...prev, ...data.optionQuotes }));
+      }
+
+      setLastFetch(new Date().toISOString());
     } catch {
       setShowManual(true);
     } finally {
@@ -57,20 +183,11 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
     }
   }
 
-  function getPrice(ticker: string) {
-    const manual = manualInputs[ticker];
-    if (manual != null && manual !== "") {
-      const num = Number(manual);
-      if (Number.isFinite(num) && num > 0) return num;
-    }
-    return prices[ticker] ?? null;
-  }
-
   return (
     <div>
       {positions.length > 0 && (
         <div style={{ marginBottom: "12px" }}>
-          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "8px" }}>
+          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "8px", alignItems: "center" }}>
             <button
               onClick={fetchPrices}
               disabled={loading}
@@ -85,7 +202,7 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
                 fontWeight: 600,
               }}
             >
-              {loading ? "Fetching..." : "🔄 Fetch Prices"}
+              {loading ? "Fetching..." : "Fetch Prices"}
             </button>
             <button
               onClick={() => setShowManual((value) => !value)}
@@ -100,8 +217,49 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
                 fontWeight: 600,
               }}
             >
-              ✏️ Manual
+              Manual
             </button>
+            <select
+              value={sortKey}
+              onChange={(event) => setSortKey(event.target.value as LiveSortKey)}
+              style={{
+                padding: "5px 8px",
+                borderRadius: "4px",
+                border: `1px solid ${DESIGN.cardBorder}`,
+                background: "rgba(255,255,255,0.02)",
+                color: DESIGN.text,
+                fontSize: "11px",
+                fontWeight: 600,
+              }}
+              title="Sort live positions"
+            >
+              <option value="dte">Sort: DTE</option>
+              <option value="risk">Sort: Risk Status</option>
+              <option value="urgency">Sort: Urgency</option>
+              <option value="capital">Sort: Risk Capital</option>
+              <option value="max_profit">Sort: Max Profit</option>
+              <option value="live_pnl">Sort: Live P/L</option>
+              <option value="ticker">Sort: Ticker</option>
+            </select>
+            <button
+              onClick={() => setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))}
+              style={{
+                padding: "5px 10px",
+                borderRadius: "4px",
+                border: `1px solid ${DESIGN.cardBorder}`,
+                background: "rgba(255,255,255,0.02)",
+                color: DESIGN.text,
+                fontSize: "11px",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+              title="Toggle sort direction"
+            >
+              {sortDirection === "asc" ? "Asc" : "Desc"}
+            </button>
+            <span style={{ fontSize: "10px", color: DESIGN.muted, alignSelf: "center" }}>
+              Sort is remembered
+            </span>
             {lastFetch && (
               <span style={{ fontSize: "10px", color: DESIGN.muted, alignSelf: "center" }}>
                 Updated {new Date(lastFetch).toLocaleTimeString()}
@@ -113,7 +271,7 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: `repeat(${positions.length}, minmax(0, 1fr))`,
+                gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
                 gap: "6px",
                 marginBottom: "8px",
               }}
@@ -161,11 +319,12 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
         </div>
       )}
 
-      {positions.map((position) => (
+      {sortedPositions.map((position) => (
         <PositionCard
           key={position.id}
           position={position}
           price={getPrice(position.ticker)}
+          optionQuotes={optionQuotes}
           expanded={expandedId === position.id}
           onToggle={() => setExpandedId((current) => (current === position.id ? null : position.id))}
         />
