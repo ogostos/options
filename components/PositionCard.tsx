@@ -110,12 +110,12 @@ export function PositionCard({
   const legSources = Array.from(
     new Set(live.legs.map((leg) => leg.source).filter((value): value is string => Boolean(value))),
   );
-  const quoteProviderSummary =
+  const legMarkSummary =
     legSources.length === 0
-      ? "No leg quotes"
+      ? "missing"
       : legSources.length === 1
         ? sourceLabel(legSources[0])
-        : `Mixed (${legSources.map((value) => sourceLabel(value)).join(" / ")})`;
+        : `mixed (${legSources.map((value) => sourceLabel(value)).join(" / ")})`;
 
   return (
     <div
@@ -220,8 +220,8 @@ export function PositionCard({
             </span>
           </span>
         )}
-        <span title="Live option leg quote provider">
-          Quotes:{" "}
+        <span title="Live option leg mark source used for live P/L">
+          Leg marks:{" "}
           <span
             style={{
               color: legSources.length === 1 ? sourceColor(legSources[0]) : DESIGN.muted,
@@ -229,7 +229,7 @@ export function PositionCard({
               fontWeight: 700,
             }}
           >
-            {quoteProviderSummary}
+            {legMarkSummary}
           </span>
         </span>
         {position.catalyst && position.catalyst !== "None" && (

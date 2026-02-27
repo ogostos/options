@@ -52,22 +52,22 @@ function withMarkerLayout(markers: Array<Marker & { x: number }>, width: number,
   let bottomLane = 0;
 
   return sorted.map((marker) => {
-    if (marker.x - lastTopX < 34) {
+    if (marker.x - lastTopX < 30) {
       topLane = topLane === 0 ? 1 : 0;
     } else {
       topLane = 0;
     }
     lastTopX = marker.x;
 
-    if (marker.x - lastBottomX < 46) {
+    if (marker.x - lastBottomX < 38) {
       bottomLane = bottomLane === 0 ? 1 : 0;
     } else {
       bottomLane = 0;
     }
     lastBottomX = marker.x;
 
-    const labelY = topLane === 0 ? padY + 8 : padY + 16;
-    const valueY = bottomLane === 0 ? height - 4 : height - 12;
+    const labelY = topLane === 0 ? padY + 7 : padY + 14;
+    const valueY = bottomLane === 0 ? height - 3 : height - 10;
 
     let textAnchor: "start" | "middle" | "end" = "middle";
     let textDx = 0;
@@ -222,14 +222,14 @@ export function BreakevenBar({
   if (!model) return null;
 
   const width = 1000;
-  const height = 120;
-  const padX = 34;
-  const padY = 14;
+  const height = 84;
+  const padX = 28;
+  const padY = 10;
   const innerW = width - padX * 2;
   const innerH = height - padY * 2;
 
-  const points = Array.from({ length: 90 }, (_, idx) => {
-    const t = idx / 89;
+  const points = Array.from({ length: 140 }, (_, idx) => {
+    const t = idx / 139;
     const x = model.rangeMin + t * (model.rangeMax - model.rangeMin);
     const pnl = model.pnlAtPrice(x);
     return { x, pnl };
@@ -284,7 +284,7 @@ export function BreakevenBar({
       >
         <svg
           viewBox={`0 0 ${width} ${height}`}
-          style={{ width: "100%", height: "auto", display: "block" }}
+          style={{ width: "100%", height: "94px", display: "block" }}
           preserveAspectRatio="xMidYMid meet"
         >
           <line x1={padX} y1={zeroY} x2={width - padX} y2={zeroY} stroke="rgba(255,255,255,0.2)" strokeDasharray="4 4" />
@@ -297,7 +297,7 @@ export function BreakevenBar({
             const y2 = yToSvg(next.pnl);
             const mid = (point.pnl + next.pnl) / 2;
             const stroke = mid >= 0 ? DESIGN.green : DESIGN.red;
-            return <line key={`${index}-${point.x}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={stroke} strokeWidth="2.5" />;
+            return <line key={`${index}-${point.x}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={stroke} strokeWidth="2.2" />;
           })}
 
           {laidOutMarkers.map((marker) => (
@@ -307,7 +307,7 @@ export function BreakevenBar({
                 x={marker.x + marker.textDx}
                 y={marker.labelY}
                 fill={marker.color}
-                fontSize="9"
+                fontSize="8"
                 fontFamily={DESIGN.mono}
                 textAnchor={marker.textAnchor}
                 fontWeight="700"
@@ -318,7 +318,7 @@ export function BreakevenBar({
                 x={marker.x + marker.textDx}
                 y={marker.valueY}
                 fill={DESIGN.muted}
-                fontSize="9"
+                fontSize="8"
                 fontFamily={DESIGN.mono}
                 textAnchor={marker.textAnchor}
               >
@@ -332,16 +332,16 @@ export function BreakevenBar({
               <circle
                 cx={priceX}
                 cy={priceY}
-                r="5"
+                r="4.5"
                 fill={pricePnl != null && pricePnl >= 0 ? DESIGN.green : DESIGN.red}
                 stroke="#fff"
-                strokeWidth="2"
+                strokeWidth="1.6"
               />
               <text
                 x={priceX}
                 y={Math.max(padY + 12, priceY - 10)}
                 fill={DESIGN.bright}
-                fontSize="10"
+                fontSize="9"
                 fontFamily={DESIGN.mono}
                 textAnchor="middle"
                 fontWeight="700"

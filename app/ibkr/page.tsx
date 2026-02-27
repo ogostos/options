@@ -7,15 +7,20 @@ import { LiveTab } from "@/components/LiveTab";
 import { Card } from "@/components/ui/primitives";
 import { DESIGN, formatMoney, formatSigned } from "@/lib/design";
 import { buildIbkrLiveModel } from "@/lib/ibkr-transform";
-import type { IbkrSyncSnapshot } from "@/lib/types";
+import { buildLiveOptionSnapshot } from "@/lib/live-position-metrics";
+import type { IbkrSyncSnapshot, Trade } from "@/lib/types";
 
 type IbkrDashboardPayload = {
   snapshot?: IbkrSyncSnapshot;
+  baselineOpenTrades?: Trade[];
+  baselineOptionTradeCount?: number;
   error?: string;
 };
 
 export default function IbkrPage() {
   const [snapshot, setSnapshot] = useState<IbkrSyncSnapshot | null>(null);
+  const [baselineOpenTrades, setBaselineOpenTrades] = useState<Trade[]>([]);
+  const [baselineOptionTradeCount, setBaselineOptionTradeCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [assetFilter, setAssetFilter] = useState<"options" | "stocks" | "all">("options");
@@ -31,6 +36,8 @@ export default function IbkrPage() {
           throw new Error(data.error ?? "Failed to load IBKR snapshot");
         }
         setSnapshot(data.snapshot);
+        setBaselineOpenTrades(data.baselineOpenTrades ?? []);
+        setBaselineOptionTradeCount(data.baselineOptionTradeCount ?? 0);
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Failed to load IBKR snapshot");
       } finally {
@@ -39,7 +46,52 @@ export default function IbkrPage() {
     })();
   }, []);
 
-  const model = useMemo(() => (snapshot ? buildIbkrLiveModel(snapshot) : null), [snapshot]);
+  const model = useMemo(
+    () =>
+      snapshot
+        ? buildIbkrLiveModel(snapshot, {
+            baselineOpenTrades,
+          })
+        : null,
+    [baselineOpenTrades, snapshot],
+  );
+
+  const liveTotals = useMemo(() => {
+    if (!model) return null;
+    const totalRisk = model.openPositions.reduce((sum, trade) => sum + trade.max_risk, 0);
+    const totalMaxProfit = model.openPositions.reduce(
+      (sum, trade) => sum + (trade.max_profit ?? 0),
+      0,
+    );
+    const quoted = model.openPositions.map((trade) =>
+      buildLiveOptionSnapshot(trade, model.optionQuotes),
+    );
+    const quotedCount = quoted.filter((item) => item.hasAllQuotes).length;
+    const totalLivePnl = quoted.reduce(
+      (sum, item) => sum + (item.livePnl ?? 0),
+      0,
+    );
+    const activePct =
+      baselineOptionTradeCount > 0
+        ? (model.openPositions.length / baselineOptionTradeCount) * 100
+        : null;
+    const riskPctOfNetLiq =
+      model.accountSummary.netLiq != null && model.accountSummary.netLiq > 0
+        ? (totalRisk / model.accountSummary.netLiq) * 100
+        : null;
+    return {
+      totalRisk,
+      totalMaxProfit,
+      totalLivePnl,
+      quotedCount,
+      quoteCoveragePct:
+        model.openPositions.length > 0
+          ? (quotedCount / model.openPositions.length) * 100
+          : 0,
+      activePct,
+      riskPctOfNetLiq,
+    };
+  }, [baselineOptionTradeCount, model]);
 
   return (
     <main style={{ minHeight: "100vh", background: DESIGN.bg, color: DESIGN.text, fontFamily: DESIGN.sans, padding: "20px" }}>
@@ -114,6 +166,69 @@ export default function IbkrPage() {
                 </div>
               </div>
             </Card>
+
+            {liveTotals && (
+              <Card style={{ marginBottom: "10px" }}>
+                <div style={{ fontSize: "13px", fontWeight: 700, color: DESIGN.blue, marginBottom: "8px" }}>
+                  IBKR Live Totals
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "8px" }}>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Open Option Trades</div>
+                    <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                      {model.openPositions.length}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Total Risk</div>
+                    <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.red }}>
+                      {formatMoney(liveTotals.totalRisk)}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Total Max Profit</div>
+                    <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.green }}>
+                      {formatMoney(liveTotals.totalMaxProfit)}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Quoted Live P/L</div>
+                    <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: liveTotals.totalLivePnl >= 0 ? DESIGN.green : DESIGN.red }}>
+                      {formatSigned(liveTotals.totalLivePnl)}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Risk / Net Liq</div>
+                    <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                      {liveTotals.riskPctOfNetLiq != null ? `${liveTotals.riskPctOfNetLiq.toFixed(2)}%` : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Quote Coverage</div>
+                    <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                      {liveTotals.quotedCount}/{model.openPositions.length} ({liveTotals.quoteCoveragePct.toFixed(0)}%)
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Active vs Option History</div>
+                    <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                      {liveTotals.activePct != null ? `${liveTotals.activePct.toFixed(1)}%` : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Mapping Status</div>
+                    <div style={{ fontSize: "12px", fontFamily: DESIGN.mono, color: model.meta.derivedTrades > 0 ? DESIGN.yellow : DESIGN.green }}>
+                      matched {model.meta.matchedTrades} · derived {model.meta.derivedTrades}
+                    </div>
+                  </div>
+                </div>
+                {model.meta.unmatchedLegs > 0 && (
+                  <div style={{ marginTop: "8px", fontSize: "11px", color: DESIGN.yellow }}>
+                    {model.meta.unmatchedLegs} option legs were not mapped to existing dashboard trades and were derived from raw IBKR positions.
+                  </div>
+                )}
+              </Card>
+            )}
 
             <div style={{ display: "flex", gap: "4px", marginBottom: "10px", justifyContent: "flex-end", flexWrap: "wrap" }}>
               {([

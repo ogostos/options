@@ -1,6 +1,6 @@
-import { detectSpreadFromLegs, type ParsedLeg } from "@/lib/spread-detector";
-import type { OptionQuoteMap } from "@/lib/live-position-metrics";
-import type { IbkrPositionRecord, IbkrSyncSnapshot, IbkrTradeRecord, StockPosition, Trade } from "@/lib/types";
+import { detectSpreadFromLegs, type ParsedLeg } from "./spread-detector.ts";
+import type { OptionQuoteMap } from "./live-position-metrics.ts";
+import type { IbkrPositionRecord, IbkrSyncSnapshot, IbkrTradeRecord, StockPosition, Trade } from "./types.ts";
 
 type ParsedOptionLeg = {
   ticker: string;
@@ -31,6 +31,16 @@ export interface IbkrLiveModel {
   optionQuotes: OptionQuoteMap;
   underlyingPrices: Record<string, number>;
   recentTrades: IbkrTradeRecord[];
+  meta: {
+    matchedTrades: number;
+    derivedTrades: number;
+    unmatchedLegs: number;
+    baselineOpenTrades: number;
+  };
+}
+
+interface BuildIbkrLiveModelOptions {
+  baselineOpenTrades?: Trade[];
 }
 
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
@@ -38,16 +48,41 @@ const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "
 function toNum(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
-    const n = Number(value.replace(/,/g, ""));
+    const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+    if (!match) return null;
+    const n = Number(match[0]);
     if (Number.isFinite(n)) return n;
+  }
+  if (value && typeof value === "object") {
+    const candidate =
+      toNum((value as Record<string, unknown>).value) ??
+      toNum((value as Record<string, unknown>).amount) ??
+      toNum((value as Record<string, unknown>).val);
+    if (candidate != null) return candidate;
   }
   return null;
 }
 
-function pickSummary(summary: Record<string, unknown>, keys: string[]): number | null {
+function normalizeSummaryKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function buildSummaryLookup(summary: Record<string, unknown>): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const [key, raw] of Object.entries(summary)) {
+    const numeric = toNum(raw);
+    if (numeric == null) continue;
+    map.set(normalizeSummaryKey(key), numeric);
+  }
+  return map;
+}
+
+function pickSummary(summary: Record<string, unknown>, lookup: Map<string, number>, keys: string[]): number | null {
   for (const key of keys) {
     const value = toNum(summary[key]);
     if (value != null) return value;
+    const normalized = lookup.get(normalizeSummaryKey(key));
+    if (normalized != null) return normalized;
   }
   return null;
 }
@@ -77,6 +112,10 @@ function cleanStrike(value: number): string {
   return String(rounded).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function normalizeSymbol(symbol: string): string {
+  return symbol.trim().toUpperCase().replace(/\s+/g, " ");
+}
+
 function parseOptionLeg(row: IbkrPositionRecord): ParsedOptionLeg | null {
   const combined = `${row.symbol ?? ""} ${row.contract ?? ""}`.toUpperCase();
   const match = combined.match(/([A-Z.]+)\s+(\d{6})([CP])(\d{8})/);
@@ -92,7 +131,7 @@ function parseOptionLeg(row: IbkrPositionRecord): ParsedOptionLeg | null {
   if (!ibCode) return null;
   const ticker = tickerRaw.toUpperCase();
   const optionType = cp as "C" | "P";
-  const ibSymbol = `${ticker} ${ibCode} ${cleanStrike(strike)} ${optionType}`;
+  const ibSymbol = normalizeSymbol(`${ticker} ${ibCode} ${cleanStrike(strike)} ${optionType}`);
 
   return {
     ticker,
@@ -126,6 +165,20 @@ function average(values: Array<number | null>): number | null {
 
 function round2(value: number): number {
   return Number(value.toFixed(2));
+}
+
+function sortUniqueSymbols(symbols: string[]): string[] {
+  return [...new Set(symbols.map((symbol) => normalizeSymbol(symbol)).filter(Boolean))].sort();
+}
+
+function normalizeAverageCost(avgCost: number | null, marketPrice: number | null): number | null {
+  if (avgCost == null || !Number.isFinite(avgCost)) return null;
+  if (marketPrice != null && marketPrice > 0) {
+    const ratio = avgCost / marketPrice;
+    if (ratio > 20 && ratio < 200) return avgCost / 100;
+  }
+  if (avgCost > 1000) return avgCost / 100;
+  return avgCost;
 }
 
 function deriveEntryDate(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLeg[]): string {
@@ -177,6 +230,51 @@ function strategyDirectionFromSingle(optionType: "C" | "P", qty: number): { stra
   };
 }
 
+function inferLegEntryFlows(legs: ParsedOptionLeg[]) {
+  const fromMarketAndUnrealized = legs.reduce((sum, leg) => {
+    const marketValue =
+      leg.marketValue ??
+      (leg.marketPrice != null ? leg.marketPrice * 100 * leg.quantity : null);
+    const unrealized = leg.unrealized;
+    if (marketValue == null || unrealized == null) return sum;
+    return sum + (marketValue - unrealized);
+  }, 0);
+
+  const completeMarket = legs.every((leg) => {
+    const marketValue =
+      leg.marketValue ??
+      (leg.marketPrice != null ? leg.marketPrice * 100 * leg.quantity : null);
+    return marketValue != null && leg.unrealized != null;
+  });
+
+  if (completeMarket && Number.isFinite(fromMarketAndUnrealized)) {
+    return {
+      debit: Math.max(fromMarketAndUnrealized, 0),
+      credit: Math.max(-fromMarketAndUnrealized, 0),
+    };
+  }
+
+  const longCost = legs
+    .filter((leg) => leg.quantity > 0)
+    .reduce((sum, leg) => {
+      const entry = normalizeAverageCost(leg.avgCost, leg.marketPrice);
+      if (entry == null) return sum;
+      return sum + Math.abs(leg.quantity) * entry * 100;
+    }, 0);
+  const shortCredit = legs
+    .filter((leg) => leg.quantity < 0)
+    .reduce((sum, leg) => {
+      const entry = normalizeAverageCost(leg.avgCost, leg.marketPrice);
+      if (entry == null) return sum;
+      return sum + Math.abs(leg.quantity) * entry * 100;
+    }, 0);
+
+  return {
+    debit: Math.max(longCost - shortCredit, 0),
+    credit: Math.max(shortCredit - longCost, 0),
+  };
+}
+
 function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLeg[], idSeed: number): Trade {
   const first = legs[0];
   const calls = legs.filter((leg) => leg.optionType === "C").sort((a, b) => a.strike - b.strike);
@@ -203,15 +301,7 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
     direction = detected.direction;
   }
 
-  const longCost = legs
-    .filter((leg) => leg.quantity > 0)
-    .reduce((sum, leg) => sum + Math.abs(leg.quantity) * ((leg.avgCost ?? 0) * 100), 0);
-  const shortCredit = legs
-    .filter((leg) => leg.quantity < 0)
-    .reduce((sum, leg) => sum + Math.abs(leg.quantity) * ((leg.avgCost ?? 0) * 100), 0);
-
-  const debit = Math.max(longCost - shortCredit, 0);
-  const credit = Math.max(shortCredit - longCost, 0);
+  const { debit, credit } = inferLegEntryFlows(legs);
 
   let maxRisk = debit > 0 ? debit : Math.max(credit, 0);
   let maxProfit: number | null = null;
@@ -263,14 +353,22 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
       breakeven = shortPut - maxProfit / (100 * maxAbsQty);
     }
   } else {
-    maxRisk = Math.max(debit, credit);
+    maxRisk = Math.max(debit, credit, 0);
     maxProfit = credit > 0 ? credit : null;
   }
 
   const longStrikes = legs.filter((leg) => leg.quantity > 0).map((leg) => leg.strike).sort((a, b) => a - b);
   const shortStrikes = legs.filter((leg) => leg.quantity < 0).map((leg) => leg.strike).sort((a, b) => a - b);
-  const closeLong = average(legs.filter((leg) => leg.quantity > 0).map((leg) => leg.avgCost));
-  const closeShort = average(legs.filter((leg) => leg.quantity < 0).map((leg) => leg.avgCost));
+  const closeLong = average(
+    legs
+      .filter((leg) => leg.quantity > 0)
+      .map((leg) => normalizeAverageCost(leg.avgCost, leg.marketPrice)),
+  );
+  const closeShort = average(
+    legs
+      .filter((leg) => leg.quantity < 0)
+      .map((leg) => normalizeAverageCost(leg.avgCost, leg.marketPrice)),
+  );
   const unrealized = round2(legs.reduce((sum, leg) => sum + (leg.unrealized ?? 0), 0));
   const realized = round2(legs.reduce((sum, leg) => sum + (leg.realized ?? 0), 0));
   const entryDate = deriveEntryDate(snapshot, legs);
@@ -294,8 +392,8 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
     status: "OPEN",
     position_type: "option",
     cost_basis: round2(strategy === "Bull Put Spread" || strategy === "Bear Call Spread" || strategy === "Iron Condor" ? credit : maxRisk),
-    max_risk: round2(maxRisk),
-    max_profit: maxProfit == null ? null : round2(maxProfit),
+    max_risk: round2(Math.max(maxRisk, 0)),
+    max_profit: maxProfit == null ? null : round2(Math.max(maxProfit, 0)),
     realized_pl: realized,
     unrealized_pl: unrealized,
     return_pct: null,
@@ -320,12 +418,43 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
     exit_balanced: "",
     exit_aggressive: "",
     source: "import",
-    ib_symbols: legs.map((leg) => leg.ibSymbol).sort(),
+    ib_symbols: sortUniqueSymbols(legs.map((leg) => leg.ibSymbol)),
   };
 }
 
-export function buildIbkrLiveModel(snapshot: IbkrSyncSnapshot): IbkrLiveModel {
-  const groups = new Map<string, ParsedOptionLeg[]>();
+function buildTradeFromBaseline(snapshot: IbkrSyncSnapshot, baseline: Trade, legs: ParsedOptionLeg[]): Trade {
+  const contractsFromLegs = Math.max(...legs.map((leg) => Math.abs(leg.quantity)), baseline.contracts, 1);
+  const unrealized = round2(legs.reduce((sum, leg) => sum + (leg.unrealized ?? 0), 0));
+  const realized = round2(legs.reduce((sum, leg) => sum + (leg.realized ?? 0), 0));
+  return {
+    ...baseline,
+    updated_at: snapshot.created_at,
+    status: "OPEN",
+    contracts: contractsFromLegs,
+    expiry_date: legs[0]?.expiryDate ?? baseline.expiry_date,
+    unrealized_pl: Number.isFinite(unrealized) ? unrealized : baseline.unrealized_pl,
+    realized_pl: baseline.realized_pl ?? realized,
+    ib_symbols: sortUniqueSymbols(baseline.ib_symbols ?? []),
+  };
+}
+
+function groupUnmatchedLegs(legs: ParsedOptionLeg[]) {
+  const grouped = new Map<string, ParsedOptionLeg[]>();
+  for (const leg of legs) {
+    const key = `${leg.ticker}|${leg.expiryDate}`;
+    const bucket = grouped.get(key) ?? [];
+    bucket.push(leg);
+    grouped.set(key, bucket);
+  }
+  return grouped;
+}
+
+export function buildIbkrLiveModel(
+  snapshot: IbkrSyncSnapshot,
+  options?: BuildIbkrLiveModelOptions,
+): IbkrLiveModel {
+  const baselineOpenTrades = options?.baselineOpenTrades ?? [];
+  const parsedOptionLegs: ParsedOptionLeg[] = [];
   const stocks: StockPosition[] = [];
   const optionQuotes: OptionQuoteMap = {};
   const underlyingPrices: Record<string, number> = {};
@@ -334,10 +463,7 @@ export function buildIbkrLiveModel(snapshot: IbkrSyncSnapshot): IbkrLiveModel {
   for (const row of snapshot.positions) {
     const parsed = parseOptionLeg(row);
     if (parsed) {
-      const key = `${parsed.ticker}|${parsed.expiryDate}`;
-      const bucket = groups.get(key) ?? [];
-      bucket.push(parsed);
-      groups.set(key, bucket);
+      parsedOptionLegs.push(parsed);
 
       if (parsed.marketPrice != null) {
         optionQuotes[parsed.ibSymbol] = {
@@ -373,19 +499,45 @@ export function buildIbkrLiveModel(snapshot: IbkrSyncSnapshot): IbkrLiveModel {
     }
   }
 
-  let idSeed = 1;
-  const openPositions = [...groups.values()]
-    .map((legs) => buildTradeFromLegGroup(snapshot, legs, idSeed++))
-    .sort((a, b) => a.ticker.localeCompare(b.ticker));
+  const legBySymbol = new Map<string, ParsedOptionLeg>();
+  for (const leg of parsedOptionLegs) {
+    legBySymbol.set(leg.ibSymbol, leg);
+  }
+
+  const consumedSymbols = new Set<string>();
+  const matchedPositions: Trade[] = [];
+  for (const baseline of baselineOpenTrades) {
+    const required = sortUniqueSymbols(baseline.ib_symbols ?? []);
+    if (required.length === 0) continue;
+    if (required.some((symbol) => consumedSymbols.has(symbol))) continue;
+    const legs = required
+      .map((symbol) => legBySymbol.get(symbol))
+      .filter((value): value is ParsedOptionLeg => Boolean(value));
+    if (legs.length !== required.length) continue;
+    for (const symbol of required) consumedSymbols.add(symbol);
+    matchedPositions.push(buildTradeFromBaseline(snapshot, baseline, legs));
+  }
+
+  const unmatchedLegs = parsedOptionLegs.filter((leg) => !consumedSymbols.has(leg.ibSymbol));
+  const unmatchedGroups = groupUnmatchedLegs(unmatchedLegs);
+  let derivedId = -1;
+  const derivedPositions = [...unmatchedGroups.values()].map((legs) =>
+    buildTradeFromLegGroup(snapshot, legs, derivedId--),
+  );
+
+  const openPositions = [...matchedPositions, ...derivedPositions].sort((a, b) =>
+    a.ticker.localeCompare(b.ticker),
+  );
 
   const summary = snapshot.summary ?? {};
-  const cash = pickSummary(summary, ["totalCashValue", "TotalCashValue", "cash", "cashBalance"]);
+  const lookup = buildSummaryLookup(summary);
+  const cash = pickSummary(summary, lookup, ["totalCashValue", "TotalCashValue", "cash", "cashBalance"]);
   const accountSummary = {
-    netLiq: pickSummary(summary, ["netLiquidation", "NetLiquidation", "net_liquidation"]),
+    netLiq: pickSummary(summary, lookup, ["netLiquidation", "NetLiquidation", "net_liquidation"]),
     cash,
-    buyingPower: pickSummary(summary, ["buyingPower", "BuyingPower"]),
-    maintenanceMargin: pickSummary(summary, ["maintMarginReq", "MaintMarginReq", "maintenanceMargin"]),
-    excessLiquidity: pickSummary(summary, ["excessLiquidity", "ExcessLiquidity"]),
+    buyingPower: pickSummary(summary, lookup, ["buyingPower", "BuyingPower"]),
+    maintenanceMargin: pickSummary(summary, lookup, ["maintMarginReq", "MaintMarginReq", "maintenanceMargin"]),
+    excessLiquidity: pickSummary(summary, lookup, ["excessLiquidity", "ExcessLiquidity"]),
     marginDebt: cash != null && cash < 0 ? Math.abs(cash) : 0,
   };
 
@@ -396,5 +548,11 @@ export function buildIbkrLiveModel(snapshot: IbkrSyncSnapshot): IbkrLiveModel {
     optionQuotes,
     underlyingPrices,
     recentTrades: snapshot.trades,
+    meta: {
+      matchedTrades: matchedPositions.length,
+      derivedTrades: derivedPositions.length,
+      unmatchedLegs: unmatchedLegs.length,
+      baselineOpenTrades: baselineOpenTrades.length,
+    },
   };
 }

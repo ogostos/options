@@ -24,10 +24,10 @@ export default function IbkrSyncPage() {
   const [status, setStatus] = useState<SyncStatusPayload["snapshot"] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
 
-  async function loadStatus() {
-    setLoading(true);
-    setError(null);
+  async function loadStatus(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const resp = await fetch("/api/ibkr-sync", { cache: "no-store" });
       const data = (await resp.json()) as SyncStatusPayload;
@@ -35,15 +35,21 @@ export default function IbkrSyncPage() {
         throw new Error(data.error ?? "Failed to load IBKR sync status");
       }
       setStatus(data.snapshot ?? null);
+      setError(null);
+      setLastCheckedAt(new Date().toISOString());
     } catch (statusError) {
       setError(statusError instanceof Error ? statusError.message : "Failed to load IBKR sync status");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
   useEffect(() => {
     void loadStatus();
+    const timer = setInterval(() => {
+      void loadStatus(true);
+    }, 10000);
+    return () => clearInterval(timer);
   }, []);
 
   return (
@@ -68,7 +74,7 @@ export default function IbkrSyncPage() {
             Default local panel URL: <span style={{ color: DESIGN.blue, fontFamily: DESIGN.mono }}>http://localhost:8913</span>
           </div>
           <div style={{ marginTop: "6px", fontSize: "11px", color: DESIGN.yellow }}>
-            This page only shows latest status. Fetch and sync actions happen in the local panel.
+            This page auto-refreshes status every 10 seconds. Fetch and sync actions happen in the local panel.
           </div>
         </Card>
 
@@ -87,9 +93,15 @@ export default function IbkrSyncPage() {
                 cursor: "pointer",
               }}
             >
-              Refresh Status
+              Reload Now
             </button>
           </div>
+
+          {lastCheckedAt && (
+            <div style={{ fontSize: "10px", color: DESIGN.muted, marginBottom: "6px" }}>
+              Last checked: {new Date(lastCheckedAt).toLocaleTimeString()}
+            </div>
+          )}
 
           {loading && <div style={{ fontSize: "12px", color: DESIGN.muted }}>Loading…</div>}
           {!loading && error && <div style={{ fontSize: "12px", color: DESIGN.red }}>{error}</div>}
