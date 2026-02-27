@@ -17,7 +17,7 @@ const MONTHS: Record<string, string> = {
   DEC: "12",
 };
 
-interface ParsedIBOptionSymbol {
+export interface ParsedIBOptionSymbol {
   raw: string;
   ticker: string;
   expiry: string;
@@ -25,7 +25,7 @@ interface ParsedIBOptionSymbol {
   optionType: "C" | "P";
 }
 
-interface OptionContractQuote {
+export interface OptionContractQuote {
   mark: number;
   bid: number | null;
   ask: number | null;
@@ -36,6 +36,37 @@ interface OptionContractQuote {
 interface MassiveConfig {
   apiKey: string;
   baseUrl: string;
+}
+
+export interface DebugProbeResult<T> {
+  ok: boolean;
+  status: number | null;
+  url: string | null;
+  value: T | null;
+  raw: unknown;
+  error: string | null;
+}
+
+interface YahooOptionContract {
+  strike?: number;
+  regularMarketPrice?: number;
+  bid?: number;
+  ask?: number;
+  lastPrice?: number;
+}
+
+export interface PriceSourceDebugPayload {
+  ticker: string;
+  optionSymbol: string | null;
+  parsedOption: ParsedIBOptionSymbol | null;
+  stock: {
+    massive: DebugProbeResult<{ price: number }>;
+    yahoo: DebugProbeResult<{ price: number }>;
+  };
+  option: {
+    massive: DebugProbeResult<OptionContractQuote>;
+    yahoo: DebugProbeResult<OptionContractQuote>;
+  } | null;
 }
 
 function parseYahooPrice(data: unknown): number | null {
@@ -107,6 +138,95 @@ function resolveMassiveConfig(): MassiveConfig {
     apiKey,
     baseUrl,
   };
+}
+
+function parseMassiveSnapshot(data: unknown): OptionContractQuote | null {
+  const json = data as {
+    results?: {
+      last_quote?: {
+        bid?: number;
+        ask?: number;
+      };
+      last_trade?: {
+        price?: number;
+      };
+      day?: {
+        close?: number;
+      };
+    };
+  };
+
+  const bid = json.results?.last_quote?.bid ?? null;
+  const ask = json.results?.last_quote?.ask ?? null;
+  const last = json.results?.last_trade?.price ?? json.results?.day?.close ?? null;
+  const mark =
+    bid != null && ask != null && bid > 0 && ask > 0
+      ? Number(((bid + ask) / 2).toFixed(4))
+      : last != null && Number.isFinite(last) && last > 0
+        ? Number(last.toFixed(4))
+        : null;
+
+  if (mark == null) return null;
+  return {
+    mark,
+    bid,
+    ask,
+    last,
+    source: "massive-options",
+  };
+}
+
+function pickYahooContract(contracts: YahooOptionContract[] | undefined, strike: number): YahooOptionContract | null {
+  if (!contracts || contracts.length === 0) return null;
+  const exact =
+    contracts.find((item) => {
+      const itemStrike = item.strike;
+      if (itemStrike == null || !Number.isFinite(itemStrike)) return false;
+      return Math.abs(itemStrike - strike) < 0.0001;
+    }) ?? null;
+  if (exact) return exact;
+
+  const nearest = contracts
+    .filter((item) => item.strike != null && Number.isFinite(item.strike))
+    .sort((a, b) => Math.abs((a.strike ?? 0) - strike) - Math.abs((b.strike ?? 0) - strike))[0];
+  if (!nearest) return null;
+
+  const nearestStrike = nearest.strike;
+  if (nearestStrike == null || Math.abs(nearestStrike - strike) > 0.5) return null;
+  return nearest;
+}
+
+async function fetchJsonDebug(url: string, init?: RequestInit): Promise<{
+  ok: boolean;
+  status: number;
+  raw: unknown;
+  error: string | null;
+}> {
+  try {
+    const resp = await fetch(url, { cache: "no-store", ...init });
+    const text = await resp.text();
+    let raw: unknown = null;
+    if (text.length > 0) {
+      try {
+        raw = JSON.parse(text) as unknown;
+      } catch {
+        raw = text;
+      }
+    }
+    return {
+      ok: resp.ok,
+      status: resp.status,
+      raw,
+      error: resp.ok ? null : `HTTP ${resp.status}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      raw: null,
+      error: error instanceof Error ? error.message : "Network error",
+    };
+  }
 }
 
 async function fetchYahooTicker(ticker: string): Promise<number | null> {
@@ -208,38 +328,160 @@ async function fetchMassiveOptionQuote(
   });
 
   if (!resp.ok) return null;
-  const json = (await resp.json()) as {
-    results?: {
-      last_quote?: {
-        bid?: number;
-        ask?: number;
-      };
-      last_trade?: {
-        price?: number;
-      };
-      day?: {
-        close?: number;
-      };
-    };
-  };
+  const json = (await resp.json()) as unknown;
+  return parseMassiveSnapshot(json);
+}
 
-  const bid = json.results?.last_quote?.bid ?? null;
-  const ask = json.results?.last_quote?.ask ?? null;
-  const last = json.results?.last_trade?.price ?? json.results?.day?.close ?? null;
-  const mark =
-    bid != null && ask != null && bid > 0 && ask > 0
-      ? Number(((bid + ask) / 2).toFixed(4))
-      : last != null && Number.isFinite(last) && last > 0
-        ? Number(last.toFixed(4))
+export async function probePriceSources(tickerInput: string, optionSymbolInput?: string): Promise<PriceSourceDebugPayload> {
+  const ticker = tickerInput.trim().toUpperCase();
+  const optionSymbol = optionSymbolInput?.trim().toUpperCase() || null;
+  const parsedOption = optionSymbol ? parseIBOptionSymbol(optionSymbol) : null;
+  const massiveConfig = resolveMassiveConfig();
+
+  const massiveStockUrl = massiveConfig.apiKey
+    ? `${massiveConfig.baseUrl}/v2/last/trade/${encodeURIComponent(ticker)}?apiKey=${encodeURIComponent(massiveConfig.apiKey)}`
+    : null;
+  const yahooStockUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`;
+
+  const [massiveStockResp, yahooStockResp] = await Promise.all([
+    massiveStockUrl
+      ? fetchJsonDebug(massiveStockUrl, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+        })
+      : Promise.resolve({ ok: false, status: 0, raw: null, error: "MASSIVE_API_KEY is not set" }),
+    fetchJsonDebug(yahooStockUrl, {
+      method: "GET",
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+    }),
+  ]);
+
+  const massiveStockPrice = (() => {
+    const json = massiveStockResp.raw as { results?: { p?: number } } | null;
+    const p = json?.results?.p;
+    return p != null && Number.isFinite(p) ? Number(p.toFixed(4)) : null;
+  })();
+  const yahooStockPrice = parseYahooPrice(yahooStockResp.raw);
+
+  let option: PriceSourceDebugPayload["option"] = null;
+  if (optionSymbol) {
+    if (!parsedOption) {
+      option = {
+        massive: {
+          ok: false,
+          status: null,
+          url: null,
+          value: null,
+          raw: null,
+          error: "Invalid IB option symbol format. Example: ADBE 17APR26 450 C",
+        },
+        yahoo: {
+          ok: false,
+          status: null,
+          url: null,
+          value: null,
+          raw: null,
+          error: "Invalid IB option symbol format. Example: ADBE 17APR26 450 C",
+        },
+      };
+    } else {
+      const contractTicker = toMassiveOptionTicker(parsedOption);
+      const massiveOptionUrl = massiveConfig.apiKey
+        ? `${massiveConfig.baseUrl}/v3/snapshot/options/${encodeURIComponent(parsedOption.ticker)}/${encodeURIComponent(contractTicker)}?apiKey=${encodeURIComponent(massiveConfig.apiKey)}`
         : null;
-  if (mark == null) return null;
+      const expiryUnix = Math.floor(new Date(`${parsedOption.expiry}T00:00:00Z`).getTime() / 1000);
+      const yahooOptionUrl = `https://query2.finance.yahoo.com/v7/finance/options/${encodeURIComponent(parsedOption.ticker)}?date=${expiryUnix}`;
+
+      const [massiveOptionResp, yahooOptionResp] = await Promise.all([
+        massiveOptionUrl
+          ? fetchJsonDebug(massiveOptionUrl, {
+              method: "GET",
+              headers: { Accept: "application/json" },
+            })
+          : Promise.resolve({ ok: false, status: 0, raw: null, error: "MASSIVE_API_KEY is not set" }),
+        fetchJsonDebug(yahooOptionUrl, {
+          method: "GET",
+          headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+        }),
+      ]);
+
+      const massiveOptionQuote = parseMassiveSnapshot(massiveOptionResp.raw);
+      const yahooChain = yahooOptionResp.raw as {
+        optionChain?: {
+          result?: Array<{
+            options?: Array<{
+              calls?: YahooOptionContract[];
+              puts?: YahooOptionContract[];
+            }>;
+          }>;
+        };
+      } | null;
+      const optionSet = yahooChain?.optionChain?.result?.[0]?.options?.[0];
+      const contracts = parsedOption.optionType === "C" ? optionSet?.calls : optionSet?.puts;
+      const matched = pickYahooContract(contracts, parsedOption.strike);
+      const matchedMark = matched ? markFromContract(matched) : null;
+      const yahooOptionQuote =
+        matched && matchedMark != null
+          ? {
+              mark: matchedMark,
+              bid: matched.bid ?? null,
+              ask: matched.ask ?? null,
+              last: matched.lastPrice ?? null,
+              source: "yahoo-options",
+            }
+          : null;
+
+      option = {
+        massive: {
+          ok: massiveOptionResp.ok && massiveOptionQuote != null,
+          status: massiveOptionResp.status,
+          url: massiveOptionUrl,
+          value: massiveOptionQuote,
+          raw: massiveOptionResp.raw,
+          error: massiveOptionQuote == null ? massiveOptionResp.error ?? "No option quote in snapshot" : null,
+        },
+        yahoo: {
+          ok: yahooOptionResp.ok && yahooOptionQuote != null,
+          status: yahooOptionResp.status,
+          url: yahooOptionUrl,
+          value: yahooOptionQuote,
+          raw: {
+            matchedContract: matched ?? null,
+            contractsInChain: contracts?.length ?? 0,
+            rawResultMeta: {
+              hasResult: Boolean(yahooChain?.optionChain?.result?.length),
+              hasOptions: Boolean(optionSet),
+            },
+          },
+          error: yahooOptionQuote == null ? yahooOptionResp.error ?? "No matching Yahoo option contract found" : null,
+        },
+      };
+    }
+  }
 
   return {
-    mark,
-    bid,
-    ask,
-    last,
-    source: "massive-options",
+    ticker,
+    optionSymbol,
+    parsedOption,
+    stock: {
+      massive: {
+        ok: massiveStockResp.ok && massiveStockPrice != null,
+        status: massiveStockResp.status,
+        url: massiveStockUrl,
+        value: massiveStockPrice != null ? { price: massiveStockPrice } : null,
+        raw: massiveStockResp.raw,
+        error: massiveStockPrice == null ? massiveStockResp.error ?? "No last trade price found" : null,
+      },
+      yahoo: {
+        ok: yahooStockResp.ok && yahooStockPrice != null,
+        status: yahooStockResp.status,
+        url: yahooStockUrl,
+        value: yahooStockPrice != null ? { price: Number(yahooStockPrice.toFixed(4)) } : null,
+        raw: yahooStockResp.raw,
+        error: yahooStockPrice == null ? yahooStockResp.error ?? "No Yahoo stock price found" : null,
+      },
+    },
+    option,
   };
 }
 
@@ -354,31 +596,20 @@ export async function fetchLiveOptionQuotes(
     }
 
     if (contracts) {
-      const contract =
-        contracts.find((item) => {
-          const strike = item.strike;
-          if (strike == null || !Number.isFinite(strike)) return false;
-          return Math.abs(strike - leg.strike) < 0.0001;
-        }) ??
-        contracts
-          .filter((item) => item.strike != null && Number.isFinite(item.strike))
-          .sort((a, b) => Math.abs((a.strike ?? 0) - leg.strike) - Math.abs((b.strike ?? 0) - leg.strike))[0];
+      const contract = pickYahooContract(contracts, leg.strike);
 
       if (contract != null) {
-        const strike = contract.strike;
-        if (strike != null && Math.abs(strike - leg.strike) <= 0.5) {
-          const mark = markFromContract(contract);
-          if (mark != null) {
-            out[leg.raw] = {
-              mark,
-              bid: contract.bid ?? null,
-              ask: contract.ask ?? null,
-              last: contract.lastPrice ?? null,
-              source: "yahoo-options",
-              updatedAt,
-            };
-            continue;
-          }
+        const mark = markFromContract(contract);
+        if (mark != null) {
+          out[leg.raw] = {
+            mark,
+            bid: contract.bid ?? null,
+            ask: contract.ask ?? null,
+            last: contract.lastPrice ?? null,
+            source: "yahoo-options",
+            updatedAt,
+          };
+          continue;
         }
       }
     }

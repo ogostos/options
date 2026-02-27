@@ -15,6 +15,11 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [probeTicker, setProbeTicker] = useState("ADBE");
+  const [probeOptionSymbol, setProbeOptionSymbol] = useState("ADBE 17APR26 450 C");
+  const [probeLoading, setProbeLoading] = useState(false);
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const [probeResult, setProbeResult] = useState<string | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -83,6 +88,35 @@ export default function SettingsPage() {
       setMessage("All data reset and reseeded.");
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : "Failed to reset data");
+    }
+  }
+
+  async function runPriceProbe() {
+    setProbeLoading(true);
+    setProbeError(null);
+    setProbeResult(null);
+
+    try {
+      const resp = await fetch("/api/price-debug", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ticker: probeTicker.trim().toUpperCase(),
+          optionSymbol: probeOptionSymbol.trim().toUpperCase(),
+        }),
+      });
+
+      const data = (await resp.json()) as unknown;
+      if (!resp.ok) {
+        const maybe = data as { error?: string };
+        throw new Error(maybe.error ?? "Failed to fetch quote probe");
+      }
+
+      setProbeResult(JSON.stringify(data, null, 2));
+    } catch (probeLoadError) {
+      setProbeError(probeLoadError instanceof Error ? probeLoadError.message : "Failed to fetch quote probe");
+    } finally {
+      setProbeLoading(false);
     }
   }
 
@@ -175,6 +209,71 @@ export default function SettingsPage() {
 
           {error && <div style={{ marginTop: "10px", color: DESIGN.red, fontSize: "12px" }}>{error}</div>}
           {message && <div style={{ marginTop: "10px", color: DESIGN.green, fontSize: "12px" }}>{message}</div>}
+        </Card>
+
+        <Card style={{ marginBottom: "12px" }}>
+          <div style={{ fontSize: "13px", fontWeight: 700, color: DESIGN.blue, marginBottom: "8px" }}>
+            Quote Debug (Massive vs Yahoo)
+          </div>
+          <div style={{ fontSize: "11px", color: DESIGN.muted, marginBottom: "10px" }}>
+            Uses the same stock and option-leg fetch/parsing flow as Live Positions, but returns both sources side-by-side.
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "8px", alignItems: "end" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase", marginBottom: "5px" }}>
+                Ticker
+              </label>
+              <input
+                value={probeTicker}
+                onChange={(event) => setProbeTicker(event.target.value)}
+                type="text"
+                placeholder="ADBE"
+                style={{ width: "100%", background: "rgba(0,0,0,0.45)", color: DESIGN.text, border: `1px solid ${DESIGN.cardBorder}`, borderRadius: "6px", padding: "8px 10px", fontSize: "13px" }}
+              />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase", marginBottom: "5px" }}>
+                IB Option Symbol
+              </label>
+              <input
+                value={probeOptionSymbol}
+                onChange={(event) => setProbeOptionSymbol(event.target.value)}
+                type="text"
+                placeholder="ADBE 17APR26 450 C"
+                style={{ width: "100%", background: "rgba(0,0,0,0.45)", color: DESIGN.text, border: `1px solid ${DESIGN.cardBorder}`, borderRadius: "6px", padding: "8px 10px", fontSize: "13px" }}
+              />
+            </div>
+            <button
+              onClick={runPriceProbe}
+              disabled={probeLoading}
+              style={{ padding: "8px 14px", borderRadius: "6px", border: `1px solid ${DESIGN.green}44`, background: `${DESIGN.green}18`, color: DESIGN.green, fontSize: "12px", fontWeight: 700, cursor: "pointer", minHeight: "38px" }}
+            >
+              {probeLoading ? "Fetching..." : "Fetch Both"}
+            </button>
+          </div>
+
+          {probeError && <div style={{ marginTop: "10px", color: DESIGN.red, fontSize: "12px" }}>{probeError}</div>}
+
+          {probeResult && (
+            <pre
+              style={{
+                marginTop: "10px",
+                padding: "10px",
+                borderRadius: "6px",
+                border: `1px solid ${DESIGN.cardBorder}`,
+                background: "rgba(0,0,0,0.35)",
+                color: DESIGN.text,
+                fontSize: "11px",
+                lineHeight: 1.45,
+                overflowX: "auto",
+                maxHeight: "360px",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {probeResult}
+            </pre>
+          )}
         </Card>
       </div>
     </main>
