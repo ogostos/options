@@ -66,8 +66,8 @@ function withMarkerLayout(markers: Array<Marker & { x: number }>, width: number,
     }
     lastBottomX = marker.x;
 
-    const labelY = topLane === 0 ? padY + 12 : padY + 25;
-    const valueY = bottomLane === 0 ? height - 6 : height - 20;
+    const labelY = topLane === 0 ? padY + 10 : padY + 20;
+    const valueY = bottomLane === 0 ? height - 5 : height - 15;
 
     let textAnchor: "start" | "middle" | "end" = "middle";
     let textDx = 0;
@@ -222,9 +222,9 @@ export function BreakevenBar({
   if (!model) return null;
 
   const width = 1000;
-  const height = 190;
-  const padX = 40;
-  const padY = 20;
+  const height = 142;
+  const padX = 36;
+  const padY = 16;
   const innerW = width - padX * 2;
   const innerH = height - padY * 2;
 
@@ -256,8 +256,8 @@ export function BreakevenBar({
   const priceY = pricePnl != null ? yToSvg(pricePnl) : null;
 
   return (
-    <div style={{ marginTop: "10px" }}>
-      <div style={{ display: "flex", gap: "12px", marginBottom: "6px", fontSize: "12px", flexWrap: "wrap" }}>
+    <div style={{ marginTop: "8px" }}>
+      <div style={{ display: "flex", gap: "10px", marginBottom: "5px", fontSize: "11px", flexWrap: "wrap" }}>
         {model.summary.map((line) => (
           <span key={line} style={{ color: DESIGN.muted }}>
             {line}
@@ -307,7 +307,7 @@ export function BreakevenBar({
                 x={marker.x + marker.textDx}
                 y={marker.labelY}
                 fill={marker.color}
-                fontSize="10"
+                fontSize="9"
                 fontFamily={DESIGN.mono}
                 textAnchor={marker.textAnchor}
                 fontWeight="700"
@@ -318,7 +318,7 @@ export function BreakevenBar({
                 x={marker.x + marker.textDx}
                 y={marker.valueY}
                 fill={DESIGN.muted}
-                fontSize="10"
+                fontSize="9"
                 fontFamily={DESIGN.mono}
                 textAnchor={marker.textAnchor}
               >
@@ -341,7 +341,7 @@ export function BreakevenBar({
                 x={priceX}
                 y={Math.max(padY + 12, priceY - 10)}
                 fill={DESIGN.bright}
-                fontSize="11"
+                fontSize="10"
                 fontFamily={DESIGN.mono}
                 textAnchor="middle"
                 fontWeight="700"
@@ -353,7 +353,7 @@ export function BreakevenBar({
         </svg>
       </div>
 
-      <div style={{ display: "flex", gap: "14px", marginTop: "4px", fontSize: "10px", color: DESIGN.muted, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: "12px", marginTop: "4px", fontSize: "9px", color: DESIGN.muted, flexWrap: "wrap" }}>
         <span>
           <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "50%", background: DESIGN.green, marginRight: "4px" }} />
           Profit zone
