@@ -619,8 +619,10 @@ function buildOpenTrade(
     sortExecutions(openCycleExecs)[0]?.timestamp ??
     new Date().toISOString().slice(0, 10);
 
-  const longLeg = openLegs.find((leg) => leg.quantity > 0) ?? null;
-  const shortLeg = openLegs.find((leg) => leg.quantity < 0) ?? null;
+  const longLegs = openLegs.filter((leg) => leg.quantity > 0);
+  const shortLegs = openLegs.filter((leg) => leg.quantity < 0);
+  const longLeg = longLegs[0] ?? null;
+  const shortLeg = shortLegs[0] ?? null;
 
   const costBasisOpen = Math.abs(openLegs.reduce((sum, leg) => sum + leg.costBasis, 0));
   const grossCashFlow = openCycleExecs.reduce((sum, exec) => sum + (-exec.quantity * exec.price * 100), 0);
@@ -648,6 +650,14 @@ function buildOpenTrade(
       : null;
 
   const returnPct = costBasis > 0 ? Number(((unrealizedPl / costBasis) * 100).toFixed(2)) : null;
+  const avgLongEntry =
+    longLegs.length > 0
+      ? Number((longLegs.reduce((sum, leg) => sum + leg.avgPrice, 0) / longLegs.length).toFixed(4))
+      : null;
+  const avgShortEntry =
+    shortLegs.length > 0
+      ? Number((shortLegs.reduce((sum, leg) => sum + leg.avgPrice, 0) / shortLegs.length).toFixed(4))
+      : null;
 
   return {
     ticker,
@@ -673,8 +683,9 @@ function buildOpenTrade(
     stop_loss: strikeLong != null ? strikeLong * 0.965 : null,
     strike_long: strikeLong,
     strike_short: strikeShort,
-    close_price_long: longLeg?.closePrice ?? null,
-    close_price_short: shortLeg?.closePrice ?? null,
+    // Store average entry prices so live cards/forms can show/edit what was paid/received.
+    close_price_long: avgLongEntry,
+    close_price_short: avgShortEntry,
     theta_per_day: null,
     urgency: null,
     peak_window: "",

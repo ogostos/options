@@ -98,6 +98,7 @@ export function PositionCard({
   onToggle: () => void;
 }) {
   const [detailTab, setDetailTab] = useState<"action" | "plan">("action");
+  const [showLegPrices, setShowLegPrices] = useState(false);
   const dte = computeDTE(position.expiry_date);
   const urgency = position.urgency ?? 1;
   const risk = getRiskSnapshot(position, price);
@@ -236,9 +237,30 @@ export function PositionCard({
             {position.catalyst}
           </Pill>
         )}
+        {live.legs.length > 0 && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setShowLegPrices((current) => !current);
+            }}
+            style={{
+              border: `1px solid ${DESIGN.cardBorder}`,
+              background: showLegPrices ? `${DESIGN.blue}16` : "transparent",
+              color: showLegPrices ? DESIGN.blue : DESIGN.muted,
+              fontSize: "10px",
+              borderRadius: "4px",
+              padding: "2px 8px",
+              cursor: "pointer",
+            }}
+            title="Show or hide leg-level entry/live prices"
+          >
+            {showLegPrices ? "Hide Leg Prices" : "Show Leg Prices"}
+          </button>
+        )}
       </div>
 
-      {live.legs.length > 0 && (
+      {showLegPrices && live.legs.length > 0 && (
         <div style={{ display: "flex", gap: "6px", marginTop: "8px", flexWrap: "wrap" }}>
           {live.legs.map((leg) => (
             <span

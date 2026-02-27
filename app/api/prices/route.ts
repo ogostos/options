@@ -41,7 +41,7 @@ export async function GET(request: NextRequest) {
     const settings = await getSettings();
     const [prices, optionQuotes] = await Promise.all([
       tickers.length > 0 ? fetchLivePrices(tickers, settings) : Promise.resolve({}),
-      optionSymbols.length > 0 ? fetchLiveOptionQuotes(optionSymbols) : Promise.resolve({}),
+      optionSymbols.length > 0 ? fetchLiveOptionQuotes(optionSymbols, settings) : Promise.resolve({}),
     ]);
     return NextResponse.json({ prices, optionQuotes });
   } catch (error) {
@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
     const settings = await getSettings();
     const [prices, optionQuotes] = await Promise.all([
       tickers.length > 0 ? fetchLivePrices(tickers, settings) : Promise.resolve({}),
-      optionSymbols.length > 0 ? fetchLiveOptionQuotes(optionSymbols) : Promise.resolve({}),
+      optionSymbols.length > 0 ? fetchLiveOptionQuotes(optionSymbols, settings) : Promise.resolve({}),
     ]);
     return NextResponse.json({ prices, optionQuotes });
   } catch (error) {

@@ -41,6 +41,7 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
   const [lastFetch, setLastFetch] = useState<string | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [optionQuotes, setOptionQuotes] = useState<OptionQuoteMap>({});
+  const [manualOptionMarks, setManualOptionMarks] = useState<Record<string, string>>({});
   const [sortKey, setSortKey] = useState<LiveSortKey>("dte");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
 
@@ -85,6 +86,23 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
     [manualInputs, prices],
   );
 
+  const effectiveOptionQuotes = useMemo(() => {
+    const merged: OptionQuoteMap = { ...optionQuotes };
+    for (const [symbol, raw] of Object.entries(manualOptionMarks)) {
+      const mark = Number(raw);
+      if (!Number.isFinite(mark) || mark <= 0) continue;
+      merged[symbol] = {
+        mark,
+        bid: null,
+        ask: null,
+        last: null,
+        source: "manual",
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    return merged;
+  }, [manualOptionMarks, optionQuotes]);
+
   const liveSnapshots = useMemo(() => {
     const byId = new Map<
       number,
@@ -97,14 +115,14 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
     for (const position of positions) {
       const price = getPrice(position.ticker);
       const risk = getRiskSnapshot(position, price);
-      const live = buildLiveOptionSnapshot(position, optionQuotes);
+      const live = buildLiveOptionSnapshot(position, effectiveOptionQuotes);
       byId.set(position.id, {
         riskLevel: risk.level,
         livePnl: live.livePnl,
       });
     }
     return byId;
-  }, [getPrice, optionQuotes, positions]);
+  }, [effectiveOptionQuotes, getPrice, positions]);
 
   const sortedPositions = useMemo(() => {
     const list = [...positions];
@@ -316,6 +334,65 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
               ))}
             </div>
           )}
+
+          {showManual && (
+            <div style={{ marginTop: "8px" }}>
+              <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase", fontWeight: 700, marginBottom: "6px" }}>
+                Manual Option Leg Marks (for live P/L)
+              </div>
+              <div style={{ display: "grid", gap: "6px" }}>
+                {positions.map((position) => {
+                  const symbols = (position.ib_symbols ?? []).map((symbol) => String(symbol).trim().toUpperCase()).filter(Boolean);
+                  if (symbols.length === 0) return null;
+                  return (
+                    <div
+                      key={`marks-${position.id}`}
+                      style={{
+                        padding: "8px",
+                        borderRadius: "6px",
+                        background: DESIGN.card,
+                        border: `1px solid ${DESIGN.cardBorder}`,
+                      }}
+                    >
+                      <div style={{ fontSize: "10px", color: DESIGN.muted, marginBottom: "6px", fontWeight: 700 }}>
+                        {position.ticker} legs
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "6px" }}>
+                        {symbols.map((symbol) => (
+                          <div key={symbol}>
+                            <div style={{ fontSize: "10px", color: DESIGN.muted, marginBottom: "2px", fontFamily: DESIGN.mono }}>{symbol}</div>
+                            <input
+                              type="number"
+                              step="0.01"
+                              placeholder={effectiveOptionQuotes[symbol]?.mark?.toFixed(2) ?? "—"}
+                              value={manualOptionMarks[symbol] ?? ""}
+                              onChange={(event) =>
+                                setManualOptionMarks((current) => ({
+                                  ...current,
+                                  [symbol]: event.target.value,
+                                }))
+                              }
+                              style={{
+                                width: "100%",
+                                background: "rgba(0,0,0,0.4)",
+                                border: `1px solid ${DESIGN.cardBorder}`,
+                                borderRadius: "4px",
+                                color: DESIGN.text,
+                                padding: "4px 6px",
+                                fontSize: "12px",
+                                fontFamily: DESIGN.mono,
+                                boxSizing: "border-box",
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -324,7 +401,7 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
           key={position.id}
           position={position}
           price={getPrice(position.ticker)}
-          optionQuotes={optionQuotes}
+          optionQuotes={effectiveOptionQuotes}
           expanded={expandedId === position.id}
           onToggle={() => setExpandedId((current) => (current === position.id ? null : position.id))}
         />

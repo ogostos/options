@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { Card } from "@/components/ui/primitives";
 import { DESIGN } from "@/lib/design";
+import { detectSpreadFromLegs, type ParsedLeg } from "@/lib/spread-detector";
 import type { Trade } from "@/lib/types";
 
 const STRATEGIES = [
@@ -34,6 +35,256 @@ const STRATEGY_DIRECTION: Record<string, "Bullish" | "Bearish" | "Neutral"> = {
   Custom: "Neutral",
 };
 
+type BuilderLeg = {
+  id: string;
+  side: "BUY" | "SELL";
+  optionType: "C" | "P";
+  strike: string;
+  price: string;
+};
+
+type BuilderMetrics = {
+  strategy: string;
+  direction: "Bullish" | "Bearish" | "Neutral";
+  legsLabel: string;
+  costBasis: number;
+  maxRisk: number;
+  maxProfit: number | null;
+  breakeven: number | null;
+  strikeLong: number | null;
+  strikeShort: number | null;
+  entryLong: number | null;
+  entryShort: number | null;
+};
+
+const MONTH_CODE_TO_NUM: Record<string, string> = {
+  JAN: "01",
+  FEB: "02",
+  MAR: "03",
+  APR: "04",
+  MAY: "05",
+  JUN: "06",
+  JUL: "07",
+  AUG: "08",
+  SEP: "09",
+  OCT: "10",
+  NOV: "11",
+  DEC: "12",
+};
+
+function parseDateCode(code: string): string | null {
+  const match = code.match(/^(\d{2})([A-Z]{3})(\d{2})$/);
+  if (!match) return null;
+  const [, dd, mon, yy] = match;
+  const mm = MONTH_CODE_TO_NUM[mon];
+  if (!mm) return null;
+  return `20${yy}-${mm}-${dd}`;
+}
+
+function parseBuilderText(rawText: string): {
+  ticker: string | null;
+  expiry: string | null;
+  legs: BuilderLeg[];
+} {
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const legs: BuilderLeg[] = [];
+  let ticker: string | null = null;
+  let expiry: string | null = null;
+
+  for (const line of lines) {
+    const symbolMatch = line.match(/([A-Z.]+)\s+(\d{2}[A-Z]{3}\d{2})\s+(\d+(?:\.\d+)?)\s+([CP])/i);
+    if (!symbolMatch) continue;
+    const [, tickerRaw, dateCodeRaw, strikeRaw, typeRaw] = symbolMatch;
+
+    const dateCode = dateCodeRaw.toUpperCase();
+    const parsedExpiry = parseDateCode(dateCode);
+    if (parsedExpiry) expiry = parsedExpiry;
+    ticker = tickerRaw.toUpperCase();
+
+    const qtyPriceMatch = line.match(/(-?\d+)\s+(\d+(?:\.\d{1,4})?)(?:\s|$)/);
+    const sideWordMatch = line.match(/\b(BUY|SELL)\b/i);
+    const atPriceMatch = line.match(/@\s*(\d+(?:\.\d{1,4})?)/i);
+    const qty = qtyPriceMatch ? Number(qtyPriceMatch[1]) : sideWordMatch ? (sideWordMatch[1].toUpperCase() === "BUY" ? 1 : -1) : 1;
+    const price = qtyPriceMatch
+      ? Number(qtyPriceMatch[2])
+      : atPriceMatch
+        ? Number(atPriceMatch[1])
+        : NaN;
+    if (!Number.isFinite(price)) continue;
+
+    legs.push({
+      id: `parsed-${legs.length + 1}`,
+      side: qty >= 0 ? "BUY" : "SELL",
+      optionType: typeRaw.toUpperCase() as "C" | "P",
+      strike: strikeRaw,
+      price: String(price),
+    });
+  }
+
+  return {
+    ticker,
+    expiry,
+    legs,
+  };
+}
+
+function strategyIsCredit(strategy: string) {
+  return strategy === "Bull Put Spread" || strategy === "Bear Call Spread" || strategy === "Iron Condor";
+}
+
+function round2(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function round4(value: number) {
+  return Number(value.toFixed(4));
+}
+
+function formatLegLabel(strike: number, type: "C" | "P") {
+  return `${Number.isInteger(strike) ? strike.toFixed(0) : strike}${type}`;
+}
+
+function computeBuilderMetrics(legs: BuilderLeg[], contracts: number): BuilderMetrics | null {
+  const parsedRows = legs
+    .map((leg) => ({
+      ...leg,
+      strikeNum: toNumber(leg.strike),
+      priceNum: toNumber(leg.price),
+    }))
+    .filter(
+      (leg): leg is BuilderLeg & { strikeNum: number; priceNum: number } =>
+        leg.strikeNum != null && leg.priceNum != null && leg.priceNum >= 0,
+    );
+
+  if (parsedRows.length === 0) return null;
+
+  const detectLegs: ParsedLeg[] = parsedRows.map((leg) => ({
+    ticker: "",
+    expiry: null,
+    strike: leg.strikeNum,
+    optionType: leg.optionType,
+    side: leg.side,
+    quantity: leg.side === "BUY" ? 1 : -1,
+  }));
+
+  const detected = detectSpreadFromLegs(detectLegs);
+  const strategy = detected.strategy;
+  const direction = detected.direction;
+
+  const longRows = parsedRows.filter((leg) => leg.side === "BUY");
+  const shortRows = parsedRows.filter((leg) => leg.side === "SELL");
+  const longCalls = longRows.filter((leg) => leg.optionType === "C").sort((a, b) => a.strikeNum - b.strikeNum);
+  const shortCalls = shortRows.filter((leg) => leg.optionType === "C").sort((a, b) => a.strikeNum - b.strikeNum);
+  const longPuts = longRows.filter((leg) => leg.optionType === "P").sort((a, b) => a.strikeNum - b.strikeNum);
+  const shortPuts = shortRows.filter((leg) => leg.optionType === "P").sort((a, b) => a.strikeNum - b.strikeNum);
+
+  const debitPerShare = parsedRows.reduce(
+    (sum, leg) => sum + (leg.side === "BUY" ? leg.priceNum : -leg.priceNum),
+    0,
+  );
+  const creditPerShare = Math.max(0, -debitPerShare);
+  const debitAbs = Math.max(0, debitPerShare);
+
+  const callStrikes = parsedRows.filter((leg) => leg.optionType === "C").map((leg) => leg.strikeNum).sort((a, b) => a - b);
+  const putStrikes = parsedRows.filter((leg) => leg.optionType === "P").map((leg) => leg.strikeNum).sort((a, b) => a - b);
+  const callWidth = callStrikes.length >= 2 ? callStrikes[callStrikes.length - 1] - callStrikes[0] : null;
+  const putWidth = putStrikes.length >= 2 ? putStrikes[putStrikes.length - 1] - putStrikes[0] : null;
+  const spreadWidth = Math.max(callWidth ?? 0, putWidth ?? 0);
+
+  let maxRisk = debitAbs * 100 * contracts;
+  let maxProfit: number | null = null;
+
+  if (strategyIsCredit(strategy)) {
+    const creditDollars = creditPerShare * 100 * contracts;
+    const riskDollars = Math.max(0, (spreadWidth - creditPerShare) * 100 * contracts);
+    maxRisk = round2(riskDollars);
+    maxProfit = round2(creditDollars);
+  } else if (strategy === "Bull Call Spread" || strategy === "Bear Put Spread") {
+    if (spreadWidth > 0) {
+      maxRisk = round2(debitAbs * 100 * contracts);
+      maxProfit = round2(Math.max(0, (spreadWidth - debitAbs) * 100 * contracts));
+    }
+  } else if (strategy === "Long Call" || strategy === "Long Put") {
+    maxRisk = round2(debitAbs * 100 * contracts);
+    maxProfit = null;
+  } else {
+    maxRisk = round2(Math.max(maxRisk, 0));
+    maxProfit = spreadWidth > 0 ? round2(Math.max(0, (spreadWidth - debitAbs) * 100 * contracts)) : null;
+  }
+
+  const shortPutStrike = shortPuts[shortPuts.length - 1]?.strikeNum ?? null;
+  const shortCallStrike = shortCalls[0]?.strikeNum ?? null;
+  const longCallStrike = longCalls[0]?.strikeNum ?? null;
+  const longPutStrike = longPuts[longPuts.length - 1]?.strikeNum ?? null;
+
+  let breakeven: number | null = null;
+  if (strategy === "Bull Call Spread" && longCallStrike != null) breakeven = longCallStrike + debitAbs;
+  else if (strategy === "Bear Put Spread" && longPutStrike != null) breakeven = longPutStrike - debitAbs;
+  else if (strategy === "Bull Put Spread" && shortPutStrike != null) breakeven = shortPutStrike - creditPerShare;
+  else if (strategy === "Bear Call Spread" && shortCallStrike != null) breakeven = shortCallStrike + creditPerShare;
+  else if (strategy === "Iron Condor" && shortPutStrike != null) breakeven = shortPutStrike - creditPerShare;
+  else if (strategy === "Long Call" && longCallStrike != null) breakeven = longCallStrike + debitAbs;
+  else if (strategy === "Long Put" && longPutStrike != null) breakeven = longPutStrike - debitAbs;
+
+  let strikeLong: number | null = null;
+  let strikeShort: number | null = null;
+  if (strategy === "Bull Call Spread") {
+    strikeLong = longCallStrike;
+    strikeShort = shortCalls[shortCalls.length - 1]?.strikeNum ?? null;
+  } else if (strategy === "Bear Put Spread") {
+    strikeLong = longPutStrike;
+    strikeShort = shortPuts[0]?.strikeNum ?? null;
+  } else if (strategy === "Bull Put Spread") {
+    strikeLong = longPuts[0]?.strikeNum ?? null;
+    strikeShort = shortPutStrike;
+  } else if (strategy === "Bear Call Spread") {
+    strikeLong = longCalls[longCalls.length - 1]?.strikeNum ?? null;
+    strikeShort = shortCallStrike;
+  } else if (strategy === "Iron Condor") {
+    strikeLong = shortPutStrike;
+    strikeShort = shortCallStrike;
+  } else if (strategy === "Long Call") {
+    strikeLong = longCallStrike;
+  } else if (strategy === "Long Put") {
+    strikeLong = longPutStrike;
+  } else {
+    strikeLong = longRows[0]?.strikeNum ?? null;
+    strikeShort = shortRows[0]?.strikeNum ?? null;
+  }
+
+  const entryLong =
+    longRows.length > 0
+      ? round4(longRows.reduce((sum, leg) => sum + leg.priceNum, 0) / longRows.length)
+      : null;
+  const entryShort =
+    shortRows.length > 0
+      ? round4(shortRows.reduce((sum, leg) => sum + leg.priceNum, 0) / shortRows.length)
+      : null;
+
+  const orderedLegs = [...parsedRows].sort((a, b) => a.strikeNum - b.strikeNum);
+  const legsLabel = orderedLegs.map((leg) => formatLegLabel(leg.strikeNum, leg.optionType)).join(" / ");
+
+  const costBasis = strategyIsCredit(strategy) ? maxRisk : round2(debitAbs * 100 * contracts);
+
+  return {
+    strategy,
+    direction,
+    legsLabel: legsLabel || detected.legs,
+    costBasis,
+    maxRisk: round2(maxRisk),
+    maxProfit,
+    breakeven: breakeven != null ? round4(breakeven) : null,
+    strikeLong,
+    strikeShort,
+    entryLong,
+    entryShort,
+  };
+}
+
 function toNumber(value: string): number | null {
   if (!value.trim()) return null;
   const num = Number(value);
@@ -61,6 +312,8 @@ function initialValue(trade?: Trade | null) {
     stop_loss: trade?.stop_loss != null ? String(trade.stop_loss) : "",
     strike_long: trade?.strike_long != null ? String(trade.strike_long) : "",
     strike_short: trade?.strike_short != null ? String(trade.strike_short) : "",
+    close_price_long: trade?.close_price_long != null ? String(trade.close_price_long) : "",
+    close_price_short: trade?.close_price_short != null ? String(trade.close_price_short) : "",
     theta_per_day: trade?.theta_per_day != null ? String(trade.theta_per_day) : "",
     urgency: trade?.urgency != null ? String(trade.urgency) : "3",
     hold_advice: trade?.hold_advice ?? "",
@@ -155,12 +408,25 @@ export function TradeForm({ trade, mode }: { trade?: Trade | null; mode: "create
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [directionOverridden, setDirectionOverridden] = useState(false);
+  const [builderExpiry, setBuilderExpiry] = useState(trade?.expiry_date ?? new Date().toISOString().slice(0, 10));
+  const [builderContracts, setBuilderContracts] = useState(String(trade?.contracts ?? 1));
+  const [builderText, setBuilderText] = useState("");
+  const [builderLegs, setBuilderLegs] = useState<BuilderLeg[]>([
+    { id: "leg-1", side: "BUY", optionType: "C", strike: "", price: "" },
+    { id: "leg-2", side: "SELL", optionType: "C", strike: "", price: "" },
+  ]);
+  const [showAdvanced, setShowAdvanced] = useState(mode === "edit");
 
   const isOpen = state.status === "OPEN";
 
   const title = mode === "create" ? "Add Trade" : `Edit Trade #${trade?.id ?? ""}`;
 
   const submitLabel = mode === "create" ? "Save Trade" : "Update Trade";
+
+  const builderMetrics = useMemo(
+    () => computeBuilderMetrics(builderLegs, Math.max(1, Math.trunc(toNumber(builderContracts) ?? 1))),
+    [builderContracts, builderLegs],
+  );
 
   const payload = useMemo(() => {
     const costBasis = toNumber(state.cost_basis) ?? 0;
@@ -188,6 +454,8 @@ export function TradeForm({ trade, mode }: { trade?: Trade | null; mode: "create
       stop_loss: toNumber(state.stop_loss),
       strike_long: toNumber(state.strike_long),
       strike_short: toNumber(state.strike_short),
+      close_price_long: toNumber(state.close_price_long),
+      close_price_short: toNumber(state.close_price_short),
       theta_per_day: toNumber(state.theta_per_day),
       urgency: Math.max(1, Math.min(5, Math.trunc(toNumber(state.urgency) ?? 1))),
       hold_advice: state.hold_advice,
@@ -239,12 +507,302 @@ export function TradeForm({ trade, mode }: { trade?: Trade | null; mode: "create
     }
   }
 
+  function applyBuilderToForm() {
+    if (!builderMetrics) return;
+    const contracts = Math.max(1, Math.trunc(toNumber(builderContracts) ?? 1));
+    setState((current) => ({
+      ...current,
+      strategy: builderMetrics.strategy,
+      direction: builderMetrics.direction,
+      legs: builderMetrics.legsLabel,
+      expiry_date: builderExpiry,
+      contracts: String(contracts),
+      cost_basis: String(builderMetrics.costBasis),
+      max_risk: String(builderMetrics.maxRisk),
+      max_profit: builderMetrics.maxProfit != null ? String(builderMetrics.maxProfit) : "",
+      breakeven: builderMetrics.breakeven != null ? String(builderMetrics.breakeven) : "",
+      strike_long: builderMetrics.strikeLong != null ? String(builderMetrics.strikeLong) : "",
+      strike_short: builderMetrics.strikeShort != null ? String(builderMetrics.strikeShort) : "",
+      close_price_long: builderMetrics.entryLong != null ? String(builderMetrics.entryLong) : "",
+      close_price_short: builderMetrics.entryShort != null ? String(builderMetrics.entryShort) : "",
+    }));
+    setDirectionOverridden(false);
+  }
+
+  function applyBuilderTextParse() {
+    const parsed = parseBuilderText(builderText);
+    if (parsed.legs.length > 0) {
+      setBuilderLegs(parsed.legs);
+    }
+    if (parsed.expiry) {
+      setBuilderExpiry(parsed.expiry);
+    }
+    if (parsed.ticker) {
+      const ticker = parsed.ticker;
+      setState((current) => ({ ...current, ticker }));
+    }
+  }
+
   return (
     <main style={{ minHeight: "100vh", background: DESIGN.bg, color: DESIGN.text, fontFamily: DESIGN.sans, padding: "20px" }}>
       <div style={{ maxWidth: "980px", margin: "0 auto" }}>
         <h1 style={{ fontSize: "20px", fontWeight: 700, color: DESIGN.bright, marginBottom: "12px" }}>{title}</h1>
 
         <form onSubmit={onSubmit}>
+          <Card style={{ marginBottom: "12px", borderColor: `${DESIGN.blue}33` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", flexWrap: "wrap", marginBottom: "10px" }}>
+              <div>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: DESIGN.blue, marginBottom: "2px" }}>
+                  Quick Position Builder
+                </div>
+                <div style={{ fontSize: "11px", color: DESIGN.muted }}>
+                  Enter only expiry + leg side/type/strike/price. Strategy and risk metrics are computed automatically.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={applyBuilderToForm}
+                disabled={!builderMetrics}
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: "6px",
+                  border: `1px solid ${DESIGN.blue}44`,
+                  background: `${DESIGN.blue}18`,
+                  color: DESIGN.blue,
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  cursor: builderMetrics ? "pointer" : "not-allowed",
+                  opacity: builderMetrics ? 1 : 0.5,
+                }}
+              >
+                Apply To Trade
+              </button>
+            </div>
+
+            <div style={{ marginBottom: "10px" }}>
+              <FieldLabel>Paste Text From Screenshot / IB Line (Optional)</FieldLabel>
+              <div style={{ display: "flex", gap: "8px", alignItems: "stretch" }}>
+                <TextArea
+                  value={builderText}
+                  onChange={(event) => setBuilderText(event.target.value)}
+                  placeholder="Example: CEG 17APR26 290 C ... 1 25.3700"
+                  style={{ minHeight: "56px", marginTop: "4px" }}
+                />
+                <button
+                  type="button"
+                  onClick={applyBuilderTextParse}
+                  style={{
+                    alignSelf: "flex-end",
+                    padding: "8px 10px",
+                    borderRadius: "6px",
+                    border: `1px solid ${DESIGN.cardBorder}`,
+                    background: "transparent",
+                    color: DESIGN.muted,
+                    fontSize: "11px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                    marginBottom: "2px",
+                  }}
+                >
+                  Parse Text
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "10px", marginBottom: "10px" }}>
+              <div>
+                <FieldLabel>Ticker</FieldLabel>
+                <Input
+                  value={state.ticker}
+                  placeholder="AAPL"
+                  onChange={(event) => setState((current) => ({ ...current, ticker: event.target.value.toUpperCase() }))}
+                />
+              </div>
+              <div>
+                <FieldLabel>Expiry</FieldLabel>
+                <Input type="date" value={builderExpiry} onChange={(event) => setBuilderExpiry(event.target.value)} />
+              </div>
+              <div>
+                <FieldLabel>Contracts</FieldLabel>
+                <Input type="number" min={1} value={builderContracts} onChange={(event) => setBuilderContracts(event.target.value)} />
+              </div>
+              <div style={{ alignSelf: "end", display: "flex", gap: "6px" }}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setBuilderLegs((current) => [
+                      ...current,
+                      { id: `leg-${Date.now()}-${current.length}`, side: "BUY", optionType: "C", strike: "", price: "" },
+                    ])
+                  }
+                  style={{
+                    padding: "8px 10px",
+                    borderRadius: "6px",
+                    border: `1px solid ${DESIGN.cardBorder}`,
+                    background: "transparent",
+                    color: DESIGN.muted,
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  + Add Leg
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBuilderLegs((current) => (current.length > 1 ? current.slice(0, -1) : current))}
+                  style={{
+                    padding: "8px 10px",
+                    borderRadius: "6px",
+                    border: `1px solid ${DESIGN.cardBorder}`,
+                    background: "transparent",
+                    color: DESIGN.muted,
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  - Remove
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gap: "8px", marginBottom: "10px" }}>
+              {builderLegs.map((leg, index) => (
+                <div
+                  key={leg.id}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "80px 80px 1fr 1fr",
+                    gap: "8px",
+                    alignItems: "end",
+                    padding: "8px",
+                    borderRadius: "6px",
+                    border: `1px solid ${DESIGN.cardBorder}`,
+                    background: "rgba(255,255,255,0.01)",
+                  }}
+                >
+                  <div>
+                    <FieldLabel>{`Leg ${index + 1}`}</FieldLabel>
+                    <Select
+                      value={leg.side}
+                      onChange={(event) =>
+                        setBuilderLegs((current) =>
+                          current.map((item) => (item.id === leg.id ? { ...item, side: event.target.value as "BUY" | "SELL" } : item)),
+                        )
+                      }
+                    >
+                      <option value="BUY">BUY</option>
+                      <option value="SELL">SELL</option>
+                    </Select>
+                  </div>
+                  <div>
+                    <FieldLabel>Type</FieldLabel>
+                    <Select
+                      value={leg.optionType}
+                      onChange={(event) =>
+                        setBuilderLegs((current) =>
+                          current.map((item) => (item.id === leg.id ? { ...item, optionType: event.target.value as "C" | "P" } : item)),
+                        )
+                      }
+                    >
+                      <option value="C">CALL</option>
+                      <option value="P">PUT</option>
+                    </Select>
+                  </div>
+                  <div>
+                    <FieldLabel>Strike</FieldLabel>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={leg.strike}
+                      onChange={(event) =>
+                        setBuilderLegs((current) =>
+                          current.map((item) => (item.id === leg.id ? { ...item, strike: event.target.value } : item)),
+                        )
+                      }
+                    />
+                  </div>
+                  <div>
+                    <FieldLabel>Entry Price</FieldLabel>
+                    <Input
+                      type="number"
+                      step="0.0001"
+                      value={leg.price}
+                      onChange={(event) =>
+                        setBuilderLegs((current) =>
+                          current.map((item) => (item.id === leg.id ? { ...item, price: event.target.value } : item)),
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: "8px" }}>
+              <div>
+                <FieldLabel>Detected Strategy</FieldLabel>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: DESIGN.bright }}>
+                  {builderMetrics?.strategy ?? "—"}
+                </div>
+              </div>
+              <div>
+                <FieldLabel>Direction</FieldLabel>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: DESIGN.text }}>
+                  {builderMetrics?.direction ?? "—"}
+                </div>
+              </div>
+              <div>
+                <FieldLabel>Max Risk</FieldLabel>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: DESIGN.red, fontFamily: DESIGN.mono }}>
+                  {builderMetrics ? `$${builderMetrics.maxRisk.toFixed(2)}` : "—"}
+                </div>
+              </div>
+              <div>
+                <FieldLabel>Max Profit</FieldLabel>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: DESIGN.green, fontFamily: DESIGN.mono }}>
+                  {builderMetrics?.maxProfit != null ? `$${builderMetrics.maxProfit.toFixed(2)}` : "—"}
+                </div>
+              </div>
+              <div>
+                <FieldLabel>Breakeven</FieldLabel>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: DESIGN.yellow, fontFamily: DESIGN.mono }}>
+                  {builderMetrics?.breakeven != null ? `$${builderMetrics.breakeven.toFixed(2)}` : "—"}
+                </div>
+              </div>
+              <div>
+                <FieldLabel>Entry Prices</FieldLabel>
+                <div style={{ fontSize: "11px", color: DESIGN.text, fontFamily: DESIGN.mono }}>
+                  L {builderMetrics?.entryLong != null ? builderMetrics.entryLong.toFixed(3) : "—"} / S{" "}
+                  {builderMetrics?.entryShort != null ? builderMetrics.entryShort.toFixed(3) : "—"}
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          <div style={{ marginBottom: "10px" }}>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((current) => !current)}
+              style={{
+                padding: "6px 10px",
+                borderRadius: "6px",
+                border: `1px solid ${DESIGN.cardBorder}`,
+                background: showAdvanced ? `${DESIGN.blue}12` : "transparent",
+                color: showAdvanced ? DESIGN.blue : DESIGN.muted,
+                fontSize: "11px",
+                cursor: "pointer",
+                fontWeight: 700,
+              }}
+            >
+              {showAdvanced ? "Hide Advanced Form" : "Show Advanced Form"}
+            </button>
+          </div>
+
+          {showAdvanced && (
+            <>
           <Card style={{ marginBottom: "12px" }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "10px" }}>
               <div>
@@ -367,7 +925,7 @@ export function TradeForm({ trade, mode }: { trade?: Trade | null; mode: "create
             <Card style={{ marginBottom: "12px" }}>
               <div style={{ fontSize: "12px", fontWeight: 700, color: DESIGN.blue, marginBottom: "10px" }}>Open Position Fields</div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: "10px", marginBottom: "10px" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(8, minmax(0, 1fr))", gap: "10px", marginBottom: "10px" }}>
                 <div>
                   <FieldLabel>Breakeven</FieldLabel>
                   <Input type="number" step="0.01" value={state.breakeven} onChange={(event) => setState((current) => ({ ...current, breakeven: event.target.value }))} />
@@ -383,6 +941,14 @@ export function TradeForm({ trade, mode }: { trade?: Trade | null; mode: "create
                 <div>
                   <FieldLabel>Short Strike</FieldLabel>
                   <Input type="number" step="0.01" value={state.strike_short} onChange={(event) => setState((current) => ({ ...current, strike_short: event.target.value }))} />
+                </div>
+                <div>
+                  <FieldLabel>Long Entry Px</FieldLabel>
+                  <Input type="number" step="0.0001" value={state.close_price_long} onChange={(event) => setState((current) => ({ ...current, close_price_long: event.target.value }))} />
+                </div>
+                <div>
+                  <FieldLabel>Short Entry Px</FieldLabel>
+                  <Input type="number" step="0.0001" value={state.close_price_short} onChange={(event) => setState((current) => ({ ...current, close_price_short: event.target.value }))} />
                 </div>
                 <div>
                   <FieldLabel>Theta/day</FieldLabel>
@@ -440,6 +1006,14 @@ export function TradeForm({ trade, mode }: { trade?: Trade | null; mode: "create
           </Card>
 
           {error && (
+            <div style={{ marginBottom: "12px", color: DESIGN.red, fontSize: "12px" }}>
+              {error}
+            </div>
+          )}
+            </>
+          )}
+
+          {!showAdvanced && error && (
             <div style={{ marginBottom: "12px", color: DESIGN.red, fontSize: "12px" }}>
               {error}
             </div>

@@ -172,6 +172,30 @@ function estimateEntryCashflow(position: Trade): number {
   return -position.cost_basis;
 }
 
+function estimateEntryCashflowFromLegPrices(
+  position: Trade,
+  legs: Array<{ side: "LONG" | "SHORT" }>,
+): number | null {
+  if (legs.length === 0) return null;
+  const longEntry = position.close_price_long;
+  const shortEntry = position.close_price_short;
+  if (longEntry == null && shortEntry == null) return null;
+
+  const contracts = Math.max(position.contracts || 1, 1);
+  let cashflow = 0;
+  for (const leg of legs) {
+    if (leg.side === "LONG") {
+      if (longEntry == null) return null;
+      cashflow += -longEntry * 100 * contracts;
+    } else {
+      if (shortEntry == null) return null;
+      cashflow += shortEntry * 100 * contracts;
+    }
+  }
+
+  return Number(cashflow.toFixed(2));
+}
+
 export function buildLiveOptionSnapshot(position: Trade, optionQuotes: OptionQuoteMap): LiveOptionSnapshot {
   const parsed = position.ib_symbols
     .map((symbol) => parseIBSymbol(symbol))
@@ -226,7 +250,8 @@ export function buildLiveOptionSnapshot(position: Trade, optionQuotes: OptionQuo
     };
   }
 
-  const entryCashflow = estimateEntryCashflow(position);
+  const entryCashflow =
+    estimateEntryCashflowFromLegPrices(position, legs) ?? estimateEntryCashflow(position);
   const livePnl = Number((markValue + entryCashflow).toFixed(2));
 
   const profitCapturePct =
