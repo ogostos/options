@@ -145,7 +145,7 @@ export default function SettingsPage() {
               style={{ width: "100%", background: "rgba(0,0,0,0.45)", color: DESIGN.text, border: `1px solid ${DESIGN.cardBorder}`, borderRadius: "6px", padding: "8px 10px", fontSize: "13px" }}
             />
             <div style={{ marginTop: "6px", fontSize: "11px", color: DESIGN.muted }}>
-              If `POLYGON_API_KEY` is set in env, Polygon quotes are used first for stocks and option legs.
+              If `MASSIVE_API_KEY` (or `POLYGON_API_KEY`) is set in env, Massive/Polygon quotes are used first for stocks and option legs.
             </div>
           </div>
 

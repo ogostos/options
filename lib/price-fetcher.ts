@@ -33,6 +33,11 @@ interface OptionContractQuote {
   source: string;
 }
 
+interface MassiveConfig {
+  apiKey: string;
+  baseUrl: string;
+}
+
 function parseYahooPrice(data: unknown): number | null {
   const maybe = data as {
     chart?: {
@@ -94,6 +99,16 @@ function markFromContract(contract: {
   return null;
 }
 
+function resolveMassiveConfig(): MassiveConfig {
+  const apiKey = (process.env.MASSIVE_API_KEY ?? process.env.POLYGON_API_KEY ?? "").trim();
+  const rawBase = (process.env.MASSIVE_API_BASE_URL ?? process.env.POLYGON_API_BASE_URL ?? "https://api.massive.com").trim();
+  const baseUrl = rawBase.replace(/\/+$/, "");
+  return {
+    apiKey,
+    baseUrl,
+  };
+}
+
 async function fetchYahooTicker(ticker: string): Promise<number | null> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`;
   const resp = await fetch(url, {
@@ -121,9 +136,10 @@ async function fetchAlphaVantageTicker(ticker: string, key: string): Promise<num
   return Number.isFinite(price) ? price : null;
 }
 
-async function fetchPolygonTicker(ticker: string, apiKey: string): Promise<number | null> {
+async function fetchMassiveTicker(ticker: string, config: MassiveConfig): Promise<number | null> {
+  const { apiKey, baseUrl } = config;
   if (!apiKey) return null;
-  const url = `https://api.polygon.io/v2/last/trade/${encodeURIComponent(ticker)}?apiKey=${encodeURIComponent(apiKey)}`;
+  const url = `${baseUrl}/v2/last/trade/${encodeURIComponent(ticker)}?apiKey=${encodeURIComponent(apiKey)}`;
   const resp = await fetch(url, { cache: "no-store" });
   if (!resp.ok) return null;
   const json = (await resp.json()) as { results?: { p?: number } };
@@ -166,7 +182,7 @@ async function fetchYahooOptionChain(ticker: string, expiryUnix: number) {
   };
 }
 
-function toPolygonOptionTicker(leg: ParsedIBOptionSymbol): string {
+function toMassiveOptionTicker(leg: ParsedIBOptionSymbol): string {
   const [yyyy, mm, dd] = leg.expiry.split("-");
   const yy = yyyy.slice(-2);
   const strikeScaled = Math.round(leg.strike * 1000);
@@ -174,13 +190,14 @@ function toPolygonOptionTicker(leg: ParsedIBOptionSymbol): string {
   return `O:${leg.ticker}${yy}${mm}${dd}${leg.optionType}${strikePart}`;
 }
 
-async function fetchPolygonOptionQuote(
+async function fetchMassiveOptionQuote(
   leg: ParsedIBOptionSymbol,
-  apiKey: string,
+  config: MassiveConfig,
 ): Promise<OptionContractQuote | null> {
+  const { apiKey, baseUrl } = config;
   if (!apiKey) return null;
-  const contractTicker = toPolygonOptionTicker(leg);
-  const url = `https://api.polygon.io/v3/snapshot/options/${encodeURIComponent(leg.ticker)}/${encodeURIComponent(contractTicker)}?apiKey=${encodeURIComponent(apiKey)}`;
+  const contractTicker = toMassiveOptionTicker(leg);
+  const url = `${baseUrl}/v3/snapshot/options/${encodeURIComponent(leg.ticker)}/${encodeURIComponent(contractTicker)}?apiKey=${encodeURIComponent(apiKey)}`;
 
   const resp = await fetch(url, {
     method: "GET",
@@ -222,7 +239,7 @@ async function fetchPolygonOptionQuote(
     bid,
     ask,
     last,
-    source: "polygon-options",
+    source: "massive-options",
   };
 }
 
@@ -232,7 +249,7 @@ export async function fetchLivePrices(
 ): Promise<PriceResponse> {
   const uniqueTickers = [...new Set(tickers.map((t) => t.trim().toUpperCase()).filter(Boolean))];
   const source = settings.price_api;
-  const polygonKey = process.env.POLYGON_API_KEY ?? "";
+  const massiveConfig = resolveMassiveConfig();
 
   const entries = await Promise.all(
     uniqueTickers.map(async (ticker) => {
@@ -243,10 +260,10 @@ export async function fetchLivePrices(
         return [ticker, null] as const;
       }
 
-      if (polygonKey) {
-        price = await fetchPolygonTicker(ticker, polygonKey);
+      if (massiveConfig.apiKey) {
+        price = await fetchMassiveTicker(ticker, massiveConfig);
         if (price != null) {
-          used = "polygon";
+          used = "massive";
         }
       }
 
@@ -317,7 +334,7 @@ export async function fetchLiveOptionQuotes(
   );
 
   const out: OptionQuoteMap = {};
-  const polygonKey = process.env.POLYGON_API_KEY ?? "";
+  const massiveConfig = resolveMassiveConfig();
   for (const leg of parsed) {
     const key = `${leg.ticker}|${leg.expiry}`;
     const chain = chainCache.get(key);
@@ -325,11 +342,11 @@ export async function fetchLiveOptionQuotes(
     const contracts = leg.optionType === "C" ? optionSet?.calls : optionSet?.puts;
     const updatedAt = new Date().toISOString();
 
-    if (polygonKey) {
-      const polygonQuote = await fetchPolygonOptionQuote(leg, polygonKey);
-      if (polygonQuote) {
+    if (massiveConfig.apiKey) {
+      const massiveQuote = await fetchMassiveOptionQuote(leg, massiveConfig);
+      if (massiveQuote) {
         out[leg.raw] = {
-          ...polygonQuote,
+          ...massiveQuote,
           updatedAt,
         };
         continue;

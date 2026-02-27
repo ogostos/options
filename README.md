@@ -34,6 +34,8 @@ Copy `.env.example` and set:
 
 ```bash
 DATABASE_URL=postgresql://...
+MASSIVE_API_KEY=... # optional, primary source for stocks + options
+MASSIVE_API_BASE_URL=https://api.massive.com # optional override
 ALPHA_VANTAGE_KEY=... # optional
 ```
 
