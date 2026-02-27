@@ -28,6 +28,8 @@ export interface PositionLegLive {
   expiry: string;
   side: "LONG" | "SHORT";
   mark: number | null;
+  source: string | null;
+  updatedAt: string | null;
 }
 
 export interface LiveOptionSnapshot {
@@ -236,6 +238,8 @@ export function buildLiveOptionSnapshot(position: Trade, optionQuotes: OptionQuo
       expiry: leg.expiry,
       side,
       mark,
+      source: quote?.source ?? null,
+      updatedAt: quote?.updatedAt ?? null,
     };
   });
 

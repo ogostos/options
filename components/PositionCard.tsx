@@ -26,6 +26,21 @@ function catalystColor(catalyst: string) {
   return catalyst === "Earnings" ? DESIGN.purple : DESIGN.green;
 }
 
+function sourceLabel(source: string | null) {
+  if (!source) return "—";
+  if (source === "massive-options") return "Massive";
+  if (source === "yahoo-options") return "Yahoo";
+  if (source === "manual") return "Manual";
+  return source;
+}
+
+function sourceColor(source: string | null) {
+  if (source === "massive-options") return DESIGN.blue;
+  if (source === "yahoo-options") return DESIGN.yellow;
+  if (source === "manual") return DESIGN.purple;
+  return DESIGN.muted;
+}
+
 function toneByLevel(level: "critical" | "defensive" | "watch" | "offensive") {
   if (level === "critical") {
     return {
@@ -92,6 +107,15 @@ export function PositionCard({
         : live.profitCapturePct > 70
           ? DESIGN.yellow
           : DESIGN.blue;
+  const legSources = Array.from(
+    new Set(live.legs.map((leg) => leg.source).filter((value): value is string => Boolean(value))),
+  );
+  const quoteProviderSummary =
+    legSources.length === 0
+      ? "No leg quotes"
+      : legSources.length === 1
+        ? sourceLabel(legSources[0])
+        : `Mixed (${legSources.map((value) => sourceLabel(value)).join(" / ")})`;
 
   return (
     <div
@@ -196,6 +220,18 @@ export function PositionCard({
             </span>
           </span>
         )}
+        <span title="Live option leg quote provider">
+          Quotes:{" "}
+          <span
+            style={{
+              color: legSources.length === 1 ? sourceColor(legSources[0]) : DESIGN.muted,
+              fontFamily: DESIGN.mono,
+              fontWeight: 700,
+            }}
+          >
+            {quoteProviderSummary}
+          </span>
+        </span>
         {position.catalyst && position.catalyst !== "None" && (
           <Pill color={catalystColor(position.catalyst)} background={`${catalystColor(position.catalyst)}15`}>
             {position.catalyst}
@@ -241,7 +277,8 @@ export function PositionCard({
               }}
             >
               {leg.side === "LONG" ? "B" : "S"} {leg.strike}
-              {leg.optionType} {leg.mark != null ? `@ ${leg.mark.toFixed(2)}` : "@ —"}
+              {leg.optionType} {leg.mark != null ? `@ ${leg.mark.toFixed(2)}` : "@ —"} ·{" "}
+              <span style={{ color: sourceColor(leg.source) }}>{sourceLabel(leg.source)}</span>
             </span>
           ))}
         </div>

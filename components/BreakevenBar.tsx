@@ -20,6 +20,14 @@ type Marker = {
   color: string;
 };
 
+type MarkerRender = Marker & {
+  x: number;
+  labelY: number;
+  valueY: number;
+  textAnchor: "start" | "middle" | "end";
+  textDx: number;
+};
+
 type PayoffModel = {
   rangeMin: number;
   rangeMax: number;
@@ -34,6 +42,51 @@ function clamp(value: number, min: number, max: number) {
 
 function formatPrice(value: number) {
   return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2);
+}
+
+function withMarkerLayout(markers: Array<Marker & { x: number }>, width: number, padX: number, height: number, padY: number): MarkerRender[] {
+  const sorted = [...markers].sort((a, b) => a.x - b.x);
+  let lastTopX = Number.NEGATIVE_INFINITY;
+  let topLane = 0;
+  let lastBottomX = Number.NEGATIVE_INFINITY;
+  let bottomLane = 0;
+
+  return sorted.map((marker) => {
+    if (marker.x - lastTopX < 40) {
+      topLane = topLane === 0 ? 1 : 0;
+    } else {
+      topLane = 0;
+    }
+    lastTopX = marker.x;
+
+    if (marker.x - lastBottomX < 52) {
+      bottomLane = bottomLane === 0 ? 1 : 0;
+    } else {
+      bottomLane = 0;
+    }
+    lastBottomX = marker.x;
+
+    const labelY = topLane === 0 ? padY + 12 : padY + 25;
+    const valueY = bottomLane === 0 ? height - 6 : height - 20;
+
+    let textAnchor: "start" | "middle" | "end" = "middle";
+    let textDx = 0;
+    if (marker.x <= padX + 14) {
+      textAnchor = "start";
+      textDx = 2;
+    } else if (marker.x >= width - padX - 14) {
+      textAnchor = "end";
+      textDx = -2;
+    }
+
+    return {
+      ...marker,
+      labelY,
+      valueY,
+      textAnchor,
+      textDx,
+    };
+  });
 }
 
 function buildPayoffModel({
@@ -169,8 +222,8 @@ export function BreakevenBar({
   if (!model) return null;
 
   const width = 1000;
-  const height = 170;
-  const padX = 36;
+  const height = 190;
+  const padX = 40;
   const padY = 20;
   const innerW = width - padX * 2;
   const innerH = height - padY * 2;
@@ -196,6 +249,7 @@ export function BreakevenBar({
   const markers = model.markers
     .filter((marker) => marker.value >= model.rangeMin && marker.value <= model.rangeMax)
     .map((marker) => ({ ...marker, x: xToSvg(marker.value) }));
+  const laidOutMarkers = withMarkerLayout(markers, width, padX, height, padY);
 
   const priceX = price != null ? xToSvg(clamp(price, model.rangeMin, model.rangeMax)) : null;
   const pricePnl = price != null ? model.pnlAtPrice(price) : null;
@@ -228,7 +282,11 @@ export function BreakevenBar({
             "linear-gradient(180deg, rgba(74,222,128,0.05) 0%, rgba(74,222,128,0.03) 48%, rgba(248,113,113,0.04) 52%, rgba(248,113,113,0.07) 100%)",
         }}
       >
-        <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="170" preserveAspectRatio="none">
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          style={{ width: "100%", height: "auto", display: "block" }}
+          preserveAspectRatio="xMidYMid meet"
+        >
           <line x1={padX} y1={zeroY} x2={width - padX} y2={zeroY} stroke="rgba(255,255,255,0.2)" strokeDasharray="4 4" />
 
           {points.slice(0, -1).map((point, index) => {
@@ -242,27 +300,27 @@ export function BreakevenBar({
             return <line key={`${index}-${point.x}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={stroke} strokeWidth="2.5" />;
           })}
 
-          {markers.map((marker) => (
+          {laidOutMarkers.map((marker) => (
             <g key={`${marker.label}-${marker.value}`}>
               <line x1={marker.x} y1={padY} x2={marker.x} y2={height - padY} stroke={marker.color} strokeOpacity="0.7" />
               <text
-                x={marker.x}
-                y={padY + 10}
+                x={marker.x + marker.textDx}
+                y={marker.labelY}
                 fill={marker.color}
                 fontSize="10"
                 fontFamily={DESIGN.mono}
-                textAnchor="middle"
+                textAnchor={marker.textAnchor}
                 fontWeight="700"
               >
                 {marker.label}
               </text>
               <text
-                x={marker.x}
-                y={height - 6}
+                x={marker.x + marker.textDx}
+                y={marker.valueY}
                 fill={DESIGN.muted}
                 fontSize="10"
                 fontFamily={DESIGN.mono}
-                textAnchor="middle"
+                textAnchor={marker.textAnchor}
               >
                 {formatPrice(marker.value)}
               </text>
