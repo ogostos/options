@@ -12,6 +12,8 @@ interface LiveTabProps {
   openPositions: Trade[];
   stocks: StockPosition[];
   assetFilter: "options" | "stocks" | "all";
+  initialPrices?: Record<string, number>;
+  initialOptionQuotes?: OptionQuoteMap;
 }
 
 type LiveSortKey =
@@ -33,15 +35,21 @@ function compareNullableNumbers(a: number | null, b: number | null) {
   return a - b;
 }
 
-export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
+export function LiveTab({
+  openPositions,
+  stocks,
+  assetFilter,
+  initialPrices,
+  initialOptionQuotes,
+}: LiveTabProps) {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [manualInputs, setManualInputs] = useState<Record<string, string>>({});
   const [showManual, setShowManual] = useState(false);
   const [showManualLegMarks, setShowManualLegMarks] = useState(false);
   const [loading, setLoading] = useState(false);
   const [lastFetch, setLastFetch] = useState<string | null>(null);
-  const [prices, setPrices] = useState<Record<string, number>>({});
-  const [optionQuotes, setOptionQuotes] = useState<OptionQuoteMap>({});
+  const [prices, setPrices] = useState<Record<string, number>>(initialPrices ?? {});
+  const [optionQuotes, setOptionQuotes] = useState<OptionQuoteMap>(initialOptionQuotes ?? {});
   const [manualOptionMarks, setManualOptionMarks] = useState<Record<string, string>>({});
   const [sortKey, setSortKey] = useState<LiveSortKey>("dte");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -74,6 +82,16 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
       // ignore storage failures
     }
   }, [sortDirection, sortKey]);
+
+  useEffect(() => {
+    if (!initialPrices) return;
+    setPrices((current) => ({ ...initialPrices, ...current }));
+  }, [initialPrices]);
+
+  useEffect(() => {
+    if (!initialOptionQuotes) return;
+    setOptionQuotes((current) => ({ ...initialOptionQuotes, ...current }));
+  }, [initialOptionQuotes]);
 
   const getPrice = useCallback(
     (ticker: string) => {

@@ -52,22 +52,22 @@ function withMarkerLayout(markers: Array<Marker & { x: number }>, width: number,
   let bottomLane = 0;
 
   return sorted.map((marker) => {
-    if (marker.x - lastTopX < 40) {
+    if (marker.x - lastTopX < 34) {
       topLane = topLane === 0 ? 1 : 0;
     } else {
       topLane = 0;
     }
     lastTopX = marker.x;
 
-    if (marker.x - lastBottomX < 52) {
+    if (marker.x - lastBottomX < 46) {
       bottomLane = bottomLane === 0 ? 1 : 0;
     } else {
       bottomLane = 0;
     }
     lastBottomX = marker.x;
 
-    const labelY = topLane === 0 ? padY + 10 : padY + 20;
-    const valueY = bottomLane === 0 ? height - 5 : height - 15;
+    const labelY = topLane === 0 ? padY + 8 : padY + 16;
+    const valueY = bottomLane === 0 ? height - 4 : height - 12;
 
     let textAnchor: "start" | "middle" | "end" = "middle";
     let textDx = 0;
@@ -222,9 +222,9 @@ export function BreakevenBar({
   if (!model) return null;
 
   const width = 1000;
-  const height = 142;
-  const padX = 36;
-  const padY = 16;
+  const height = 120;
+  const padX = 34;
+  const padY = 14;
   const innerW = width - padX * 2;
   const innerH = height - padY * 2;
 
@@ -256,8 +256,8 @@ export function BreakevenBar({
   const priceY = pricePnl != null ? yToSvg(pricePnl) : null;
 
   return (
-    <div style={{ marginTop: "8px" }}>
-      <div style={{ display: "flex", gap: "10px", marginBottom: "5px", fontSize: "11px", flexWrap: "wrap" }}>
+    <div style={{ marginTop: "7px" }}>
+      <div style={{ display: "flex", gap: "8px", marginBottom: "4px", fontSize: "10px", flexWrap: "wrap" }}>
         {model.summary.map((line) => (
           <span key={line} style={{ color: DESIGN.muted }}>
             {line}

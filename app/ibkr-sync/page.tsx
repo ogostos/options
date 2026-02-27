@@ -67,6 +67,9 @@ export default function IbkrSyncPage() {
           <div style={{ fontSize: "11px", color: DESIGN.muted }}>
             Default local panel URL: <span style={{ color: DESIGN.blue, fontFamily: DESIGN.mono }}>http://localhost:8913</span>
           </div>
+          <div style={{ marginTop: "6px", fontSize: "11px", color: DESIGN.yellow }}>
+            This page only shows latest status. Fetch and sync actions happen in the local panel.
+          </div>
         </Card>
 
         <Card>
@@ -84,7 +87,7 @@ export default function IbkrSyncPage() {
                 cursor: "pointer",
               }}
             >
-              Refresh
+              Refresh Status
             </button>
           </div>
 

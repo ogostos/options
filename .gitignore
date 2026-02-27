@@ -9,6 +9,7 @@
 .env
 .env.local
 .env.*.local
+.env.ibkr-panel
 
 # logs
 npm-debug.log*
