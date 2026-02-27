@@ -37,6 +37,7 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [manualInputs, setManualInputs] = useState<Record<string, string>>({});
   const [showManual, setShowManual] = useState(false);
+  const [showManualLegMarks, setShowManualLegMarks] = useState(false);
   const [loading, setLoading] = useState(false);
   const [lastFetch, setLastFetch] = useState<string | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
@@ -237,6 +238,21 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
             >
               Manual
             </button>
+            <button
+              onClick={() => setShowManualLegMarks((value) => !value)}
+              style={{
+                padding: "5px 14px",
+                borderRadius: "4px",
+                border: `1px solid ${DESIGN.cardBorder}`,
+                background: showManualLegMarks ? `${DESIGN.blue}14` : "transparent",
+                color: showManualLegMarks ? DESIGN.blue : DESIGN.muted,
+                fontSize: "11px",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              Leg Marks
+            </button>
             <select
               value={sortKey}
               onChange={(event) => setSortKey(event.target.value as LiveSortKey)}
@@ -335,7 +351,7 @@ export function LiveTab({ openPositions, stocks, assetFilter }: LiveTabProps) {
             </div>
           )}
 
-          {showManual && (
+          {showManualLegMarks && (
             <div style={{ marginTop: "8px" }}>
               <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase", fontWeight: 700, marginBottom: "6px" }}>
                 Manual Option Leg Marks (for live P/L)

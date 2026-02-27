@@ -150,7 +150,7 @@ export function Dashboard() {
         <div>
           <h1
             style={{
-              fontSize: "20px",
+              fontSize: "22px",
               fontWeight: 700,
               color: DESIGN.bright,
               margin: "0 0 3px 0",
@@ -159,7 +159,7 @@ export function Dashboard() {
           >
             Trading Dashboard
           </h1>
-          <p style={{ fontSize: "11px", color: DESIGN.muted, margin: 0 }}>
+          <p style={{ fontSize: "12px", color: DESIGN.muted, margin: 0 }}>
             {payload.settings.account_id} · {payload.account.period_start} – {payload.account.period_end} · NAV:{" "}
             <span style={{ color: payload.account.twr >= 0 ? DESIGN.green : DESIGN.red, fontFamily: DESIGN.mono }}>
               {formatMoney(payload.account.end_nav)} ({payload.account.twr.toFixed(2)}%)
@@ -182,7 +182,7 @@ export function Dashboard() {
                   borderRadius: "4px",
                   border: `1px solid ${DESIGN.cardBorder}`,
                   color: DESIGN.muted,
-                  fontSize: "11px",
+                  fontSize: "12px",
                   fontWeight: 600,
                 }}
               >
@@ -205,7 +205,7 @@ export function Dashboard() {
                 border: `1px solid ${assetFilter === key ? `${DESIGN.purple}66` : DESIGN.cardBorder}`,
                 background: assetFilter === key ? `${DESIGN.purple}15` : "transparent",
                 color: assetFilter === key ? DESIGN.purple : DESIGN.muted,
-                fontSize: "11px",
+                fontSize: "12px",
                 cursor: "pointer",
                 fontWeight: 600,
               }}
@@ -234,7 +234,7 @@ export function Dashboard() {
               border: "none",
               background: tab === key ? `${DESIGN.blue}15` : "transparent",
               color: tab === key ? DESIGN.blue : DESIGN.muted,
-              fontSize: "12px",
+              fontSize: "13px",
               cursor: "pointer",
               fontWeight: tab === key ? 700 : 500,
               transition: "all 0.15s",

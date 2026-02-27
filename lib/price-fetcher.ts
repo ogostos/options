@@ -121,6 +121,16 @@ async function fetchAlphaVantageTicker(ticker: string, key: string): Promise<num
   return Number.isFinite(price) ? price : null;
 }
 
+async function fetchPolygonTicker(ticker: string, apiKey: string): Promise<number | null> {
+  if (!apiKey) return null;
+  const url = `https://api.polygon.io/v2/last/trade/${encodeURIComponent(ticker)}?apiKey=${encodeURIComponent(apiKey)}`;
+  const resp = await fetch(url, { cache: "no-store" });
+  if (!resp.ok) return null;
+  const json = (await resp.json()) as { results?: { p?: number } };
+  const price = json.results?.p;
+  return price != null && Number.isFinite(price) ? Number(price.toFixed(4)) : null;
+}
+
 async function fetchYahooOptionChain(ticker: string, expiryUnix: number) {
   const url = `https://query2.finance.yahoo.com/v7/finance/options/${encodeURIComponent(ticker)}?date=${expiryUnix}`;
   const resp = await fetch(url, {
@@ -222,17 +232,25 @@ export async function fetchLivePrices(
 ): Promise<PriceResponse> {
   const uniqueTickers = [...new Set(tickers.map((t) => t.trim().toUpperCase()).filter(Boolean))];
   const source = settings.price_api;
+  const polygonKey = process.env.POLYGON_API_KEY ?? "";
 
   const entries = await Promise.all(
     uniqueTickers.map(async (ticker) => {
       let price: number | null = null;
-      let used = source;
+      let used: string = source;
 
       if (source === "manual") {
         return [ticker, null] as const;
       }
 
-      if (source === "yahoo") {
+      if (polygonKey) {
+        price = await fetchPolygonTicker(ticker, polygonKey);
+        if (price != null) {
+          used = "polygon";
+        }
+      }
+
+      if (price == null && source === "yahoo") {
         price = await fetchYahooTicker(ticker);
         if (price == null && settings.alpha_vantage_key) {
           price = await fetchAlphaVantageTicker(ticker, settings.alpha_vantage_key);
@@ -240,7 +258,7 @@ export async function fetchLivePrices(
         }
       }
 
-      if (source === "alphavantage") {
+      if (price == null && source === "alphavantage") {
         price = await fetchAlphaVantageTicker(ticker, settings.alpha_vantage_key);
         if (price == null) {
           price = await fetchYahooTicker(ticker);
@@ -307,6 +325,17 @@ export async function fetchLiveOptionQuotes(
     const contracts = leg.optionType === "C" ? optionSet?.calls : optionSet?.puts;
     const updatedAt = new Date().toISOString();
 
+    if (polygonKey) {
+      const polygonQuote = await fetchPolygonOptionQuote(leg, polygonKey);
+      if (polygonQuote) {
+        out[leg.raw] = {
+          ...polygonQuote,
+          updatedAt,
+        };
+        continue;
+      }
+    }
+
     if (contracts) {
       const contract =
         contracts.find((item) => {
@@ -335,18 +364,6 @@ export async function fetchLiveOptionQuotes(
           }
         }
       }
-    }
-
-    // Optional fallback: Polygon delayed option snapshot if POLYGON_API_KEY is set.
-    const polygonQuote = polygonKey
-      ? await fetchPolygonOptionQuote(leg, polygonKey)
-      : null;
-    if (polygonQuote) {
-      out[leg.raw] = {
-        ...polygonQuote,
-        updatedAt,
-      };
-      continue;
     }
 
     // Optional fallback: if user selected AlphaVantage and no option quote providers succeeded.

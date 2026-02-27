@@ -1,11 +1,12 @@
 import { DESIGN } from "@/lib/design";
-import { classifyIronCondorPriceZone, getIronCondorZone } from "@/lib/options-zones";
+import { estimateIronCondorPnLAtExpiry, getIronCondorZone } from "@/lib/options-zones";
 
 interface BreakevenBarProps {
   price: number | null;
   strategy: string;
   legs: string;
   contracts: number;
+  maxRisk: number;
   maxProfit: number | null;
   breakeven: number | null;
   stopLoss: number | null;
@@ -13,269 +14,132 @@ interface BreakevenBarProps {
   strikeShort: number | null;
 }
 
-function clampPct(value: number) {
-  return Math.max(0, Math.min(100, value));
+type Marker = {
+  value: number;
+  label: string;
+  color: string;
+};
+
+type PayoffModel = {
+  rangeMin: number;
+  rangeMax: number;
+  markers: Marker[];
+  summary: string[];
+  pnlAtPrice: (spot: number) => number;
+};
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
 
-function swatch(color: string) {
-  return (
-    <span
-      style={{
-        display: "inline-block",
-        width: "8px",
-        height: "8px",
-        background: color,
-        borderRadius: "2px",
-        marginRight: "3px",
-      }}
-    />
-  );
+function formatPrice(value: number) {
+  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2);
 }
 
-function renderSingleBreakeven({
-  price,
+function buildPayoffModel({
+  strategy,
+  legs,
+  contracts,
+  maxRisk,
+  maxProfit,
   breakeven,
   stopLoss,
   strikeLong,
   strikeShort,
-}: Pick<BreakevenBarProps, "price" | "breakeven" | "stopLoss" | "strikeLong" | "strikeShort">) {
-  if (breakeven == null || stopLoss == null || strikeLong == null) return null;
+}: Omit<BreakevenBarProps, "price">): PayoffModel | null {
+  const size = Math.max(contracts || 1, 1);
+  const condor = getIronCondorZone({
+    strategy,
+    legs,
+    breakeven,
+    maxProfit,
+    contracts: size,
+  });
 
-  const upperStrike = strikeShort ?? strikeLong + (breakeven - strikeLong) * 3;
-  const rangeMin = Math.min(stopLoss, strikeLong * 0.92);
-  const rangeMax = strikeShort != null ? upperStrike * 1.05 : breakeven * 1.15;
-  const range = Math.max(0.0001, rangeMax - rangeMin);
-  const toPct = (value: number) => clampPct(((value - rangeMin) / range) * 100);
+  if (condor) {
+    const spreadPadding = condor.width * 0.9;
+    const rangeMin = condor.lowerWing - spreadPadding;
+    const rangeMax = condor.upperWing + spreadPadding;
+    const markers: Marker[] = [
+      { value: condor.lowerWing, label: "LW", color: DESIGN.muted },
+      { value: condor.lowerBreakeven, label: "BE-L", color: DESIGN.yellow },
+      { value: condor.lowerShort, label: "S-P", color: DESIGN.green },
+      { value: condor.upperShort, label: "S-C", color: DESIGN.green },
+      { value: condor.upperBreakeven, label: "BE-U", color: DESIGN.yellow },
+      { value: condor.upperWing, label: "UW", color: DESIGN.muted },
+    ];
+    if (stopLoss != null) {
+      markers.push({ value: stopLoss, label: "STOP", color: DESIGN.red });
+    }
 
-  const loPct = toPct(strikeLong);
-  const bePct = toPct(breakeven);
-  const hiPct = strikeShort != null ? toPct(upperStrike) : null;
-  const stopPct = toPct(stopLoss);
-  const pricePct = price != null ? toPct(price) : null;
+    return {
+      rangeMin,
+      rangeMax,
+      markers,
+      summary: [
+        `BE range $${condor.lowerBreakeven.toFixed(2)} - $${condor.upperBreakeven.toFixed(2)}`,
+        `Max-profit core $${condor.lowerShort.toFixed(0)} - $${condor.upperShort.toFixed(0)}`,
+      ],
+      pnlAtPrice: (spot) => estimateIronCondorPnLAtExpiry(spot, condor, size),
+    };
+  }
 
-  const distToBE = price != null ? ((breakeven - price) / price) * 100 : null;
-  const distToMax = price != null && strikeShort != null ? ((upperStrike - price) / price) * 100 : null;
-  const inProfit = price != null ? price >= breakeven : false;
-  const aboveLong = price != null ? price >= strikeLong : false;
+  if (strikeLong == null || breakeven == null) return null;
 
-  return (
-    <div style={{ marginTop: "10px" }}>
-      <div style={{ display: "flex", gap: "12px", marginBottom: "6px", fontSize: "11px", flexWrap: "wrap" }}>
-        <span style={{ color: DESIGN.muted }}>
-          Breakeven:{" "}
-          <span style={{ fontFamily: DESIGN.mono, fontWeight: 700, color: DESIGN.yellow }}>${breakeven.toFixed(2)}</span>
-        </span>
-        {price != null && (
-          <span style={{ color: inProfit ? DESIGN.green : DESIGN.red }}>
-            {inProfit
-              ? "IN PROFIT ZONE"
-              : `${Math.abs(distToBE ?? 0).toFixed(1)}% below BE ($${(breakeven - price).toFixed(2)} to go)`}
-          </span>
-        )}
-        {price != null && strikeShort != null && (
-          <span style={{ color: price >= upperStrike ? DESIGN.green : DESIGN.muted }}>
-            Max profit: ${upperStrike} {price < upperStrike ? `(${(distToMax ?? 0).toFixed(1)}% away)` : "MAX"}
-          </span>
-        )}
-        <span style={{ color: DESIGN.red, fontSize: "10px" }}>Stop: ${stopLoss}</span>
-      </div>
+  const lowerStrike = strikeShort == null ? strikeLong : Math.min(strikeLong, strikeShort);
+  const upperStrike = strikeShort == null ? strikeLong : Math.max(strikeLong, strikeShort);
+  const spreadWidth = Math.max(upperStrike - lowerStrike, 0.0001);
+  const isBullish =
+    strategy.includes("Call") ||
+    strategy.includes("Bull") ||
+    (strategy.includes("Long") && strategy.includes("Call"));
+  const rangeMin = lowerStrike - spreadWidth * 1.2;
+  const rangeMax = upperStrike + spreadWidth * 1.2;
 
-      <div
-        style={{
-          position: "relative",
-          height: "32px",
-          borderRadius: "4px",
-          overflow: "hidden",
-          background: "rgba(255,255,255,0.02)",
-          border: `1px solid ${DESIGN.cardBorder}`,
-        }}
-      >
-        <div style={{ position: "absolute", left: 0, width: `${loPct}%`, height: "100%", background: "rgba(239,68,68,0.12)" }} />
-        <div
-          style={{
-            position: "absolute",
-            left: `${loPct}%`,
-            width: `${bePct - loPct}%`,
-            height: "100%",
-            background: "rgba(250,204,21,0.10)",
-          }}
-        />
+  const markers: Marker[] = [
+    { value: strikeLong, label: "LONG", color: DESIGN.muted },
+    { value: breakeven, label: "BE", color: DESIGN.yellow },
+  ];
+  if (strikeShort != null) {
+    markers.push({ value: strikeShort, label: "SHORT", color: DESIGN.green });
+  }
+  if (stopLoss != null) {
+    markers.push({ value: stopLoss, label: "STOP", color: DESIGN.red });
+  }
 
-        {hiPct != null ? (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                left: `${bePct}%`,
-                width: `${hiPct - bePct}%`,
-                height: "100%",
-                background: "rgba(74,222,128,0.12)",
-              }}
-            />
-            <div
-              style={{
-                position: "absolute",
-                left: `${hiPct}%`,
-                right: 0,
-                height: "100%",
-                background: "rgba(74,222,128,0.20)",
-              }}
-            />
-          </>
-        ) : (
-          <div
-            style={{
-              position: "absolute",
-              left: `${bePct}%`,
-              right: 0,
-              height: "100%",
-              background: "rgba(74,222,128,0.15)",
-            }}
-          />
-        )}
+  const safeMaxProfit = maxProfit ?? spreadWidth * 100 * size;
 
-        <div
-          style={{
-            position: "absolute",
-            left: `${stopPct}%`,
-            top: 0,
-            bottom: 0,
-            width: "2px",
-            background: DESIGN.red,
-            opacity: 0.6,
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: `${stopPct}%`,
-            top: "1px",
-            fontSize: "9px",
-            color: DESIGN.red,
-            fontWeight: 700,
-            transform: "translateX(-50%)",
-          }}
-        >
-          STOP
-        </div>
+  const pnlAtPrice = (spot: number) => {
+    if (strikeShort != null) {
+      if (isBullish) {
+        if (spot <= lowerStrike) return -maxRisk;
+        if (spot >= upperStrike) return safeMaxProfit;
+        const t = (spot - lowerStrike) / (upperStrike - lowerStrike);
+        return -maxRisk + t * (safeMaxProfit + maxRisk);
+      }
 
-        <div style={{ position: "absolute", left: `${loPct}%`, top: 0, bottom: 0, width: "1px", background: "rgba(255,255,255,0.3)" }} />
-        <div
-          style={{
-            position: "absolute",
-            left: `${loPct}%`,
-            bottom: "1px",
-            fontSize: "9px",
-            color: DESIGN.muted,
-            fontFamily: DESIGN.mono,
-            transform: "translateX(-50%)",
-          }}
-        >
-          {strikeLong}
-        </div>
+      if (spot >= upperStrike) return -maxRisk;
+      if (spot <= lowerStrike) return safeMaxProfit;
+      const t = (spot - lowerStrike) / (upperStrike - lowerStrike);
+      return safeMaxProfit - t * (safeMaxProfit + maxRisk);
+    }
 
-        <div
-          style={{
-            position: "absolute",
-            left: `${bePct}%`,
-            top: 0,
-            bottom: 0,
-            width: "2px",
-            background: DESIGN.yellow,
-            opacity: 0.8,
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: `${bePct}%`,
-            top: "1px",
-            fontSize: "9px",
-            color: DESIGN.yellow,
-            fontWeight: 700,
-            fontFamily: DESIGN.mono,
-            transform: "translateX(-50%)",
-          }}
-        >
-          BE
-        </div>
+    if (strategy.includes("Put")) {
+      return Math.max(0, strikeLong - spot) * 100 * size - maxRisk;
+    }
+    return Math.max(0, spot - strikeLong) * 100 * size - maxRisk;
+  };
 
-        {hiPct != null && (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                left: `${hiPct}%`,
-                top: 0,
-                bottom: 0,
-                width: "1px",
-                background: DESIGN.green,
-                opacity: 0.5,
-              }}
-            />
-            <div
-              style={{
-                position: "absolute",
-                left: `${hiPct}%`,
-                bottom: "1px",
-                fontSize: "9px",
-                color: DESIGN.green,
-                fontFamily: DESIGN.mono,
-                transform: "translateX(-50%)",
-              }}
-            >
-              {upperStrike}
-            </div>
-          </>
-        )}
-
-        {pricePct != null && (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                left: `${pricePct}%`,
-                top: "50%",
-                transform: "translate(-50%, -50%)",
-                width: "8px",
-                height: "8px",
-                borderRadius: "50%",
-                background: inProfit ? DESIGN.green : aboveLong ? DESIGN.yellow : DESIGN.red,
-                border: "2px solid #fff",
-                boxShadow: `0 0 6px ${inProfit ? DESIGN.green : aboveLong ? DESIGN.yellow : DESIGN.red}`,
-                zIndex: 10,
-              }}
-            />
-            <div
-              style={{
-                position: "absolute",
-                left: `${pricePct}%`,
-                top: "-1px",
-                transform: "translateX(-50%)",
-                fontSize: "9px",
-                fontWeight: 700,
-                fontFamily: DESIGN.mono,
-                color: DESIGN.bright,
-                zIndex: 10,
-                background: "rgba(0,0,0,0.7)",
-                padding: "0 3px",
-                borderRadius: "2px",
-              }}
-            >
-              ${price?.toFixed(0)}
-            </div>
-          </>
-        )}
-      </div>
-
-      <div style={{ display: "flex", gap: "12px", marginTop: "4px", fontSize: "9px", color: DESIGN.muted }}>
-        <span>{swatch("rgba(239,68,68,0.25)")}Max Loss</span>
-        <span>{swatch("rgba(250,204,21,0.25)")}Partial (recovering debit)</span>
-        <span>{swatch("rgba(74,222,128,0.25)")}Profit Zone</span>
-        {hiPct != null && <span>{swatch("rgba(74,222,128,0.4)")}Max Profit</span>}
-      </div>
-    </div>
-  );
+  return {
+    rangeMin,
+    rangeMax,
+    markers,
+      summary: [
+        `Breakeven $${breakeven.toFixed(2)}`,
+        `Max risk $${maxRisk.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      ],
+    pnlAtPrice,
+  };
 }
 
 export function BreakevenBar({
@@ -283,364 +147,164 @@ export function BreakevenBar({
   strategy,
   legs,
   contracts,
+  maxRisk,
   maxProfit,
   breakeven,
   stopLoss,
   strikeLong,
   strikeShort,
 }: BreakevenBarProps) {
-  const condor = getIronCondorZone({
+  const model = buildPayoffModel({
     strategy,
     legs,
-    breakeven,
-    maxProfit,
     contracts,
+    maxRisk,
+    maxProfit,
+    breakeven,
+    stopLoss,
+    strikeLong,
+    strikeShort,
   });
 
-  if (!condor) {
-    return renderSingleBreakeven({
-      price,
-      breakeven,
-      stopLoss,
-      strikeLong,
-      strikeShort,
-    });
-  }
+  if (!model) return null;
 
-  const stopDown =
-    stopLoss != null && stopLoss <= condor.lowerBreakeven
-      ? stopLoss
-      : stopLoss != null && stopLoss > condor.upperBreakeven
-        ? Number((condor.lowerBreakeven - (stopLoss - condor.upperBreakeven)).toFixed(2))
-        : null;
+  const width = 1000;
+  const height = 170;
+  const padX = 36;
+  const padY = 20;
+  const innerW = width - padX * 2;
+  const innerH = height - padY * 2;
 
-  const stopUp =
-    stopLoss != null && stopLoss >= condor.upperBreakeven
-      ? stopLoss
-      : stopDown != null
-        ? Number((condor.upperBreakeven + (condor.lowerBreakeven - stopDown)).toFixed(2))
-        : null;
+  const points = Array.from({ length: 90 }, (_, idx) => {
+    const t = idx / 89;
+    const x = model.rangeMin + t * (model.rangeMax - model.rangeMin);
+    const pnl = model.pnlAtPrice(x);
+    return { x, pnl };
+  });
 
-  const rangeMin = Math.min(condor.lowerWing - condor.width * 0.7, stopDown ?? Number.POSITIVE_INFINITY);
-  const rangeMax = Math.max(condor.upperWing + condor.width * 0.7, stopUp ?? Number.NEGATIVE_INFINITY);
-  const range = Math.max(0.0001, rangeMax - rangeMin);
-  const toPct = (value: number) => clampPct(((value - rangeMin) / range) * 100);
+  let pnlMin = Math.min(...points.map((p) => p.pnl), -maxRisk);
+  let pnlMax = Math.max(...points.map((p) => p.pnl), maxProfit ?? 0);
+  if (pnlMax <= pnlMin) pnlMax = pnlMin + 1;
+  const pnlPadding = (pnlMax - pnlMin) * 0.15;
+  pnlMin -= pnlPadding;
+  pnlMax += pnlPadding;
 
-  const lowerWingPct = toPct(condor.lowerWing);
-  const lowerBEPct = toPct(condor.lowerBreakeven);
-  const lowerShortPct = toPct(condor.lowerShort);
-  const upperShortPct = toPct(condor.upperShort);
-  const upperBEPct = toPct(condor.upperBreakeven);
-  const upperWingPct = toPct(condor.upperWing);
-  const stopDownPct = stopDown != null ? toPct(stopDown) : null;
-  const stopUpPct = stopUp != null ? toPct(stopUp) : null;
-  const pricePct = price != null ? toPct(price) : null;
+  const xToSvg = (x: number) => padX + ((x - model.rangeMin) / (model.rangeMax - model.rangeMin)) * innerW;
+  const yToSvg = (pnl: number) => padY + ((pnlMax - pnl) / (pnlMax - pnlMin)) * innerH;
+  const zeroY = yToSvg(0);
 
-  const priceZone = price != null ? classifyIronCondorPriceZone(price, condor) : null;
-  const inProfit = price != null ? price >= condor.lowerBreakeven && price <= condor.upperBreakeven : false;
-  const inCore = priceZone === "max_profit_core";
+  const markers = model.markers
+    .filter((marker) => marker.value >= model.rangeMin && marker.value <= model.rangeMax)
+    .map((marker) => ({ ...marker, x: xToSvg(marker.value) }));
 
-  const distanceToBe =
-    price == null
-      ? null
-      : price < condor.lowerBreakeven
-        ? condor.lowerBreakeven - price
-        : price > condor.upperBreakeven
-          ? price - condor.upperBreakeven
-          : Math.min(price - condor.lowerBreakeven, condor.upperBreakeven - price);
-
-  const zoneColor =
-    priceZone == null
-      ? DESIGN.muted
-      : priceZone === "max_profit_core"
-        ? DESIGN.green
-        : priceZone === "profit_low" || priceZone === "profit_high"
-          ? DESIGN.green
-          : priceZone === "recover_low" || priceZone === "recover_high"
-            ? DESIGN.yellow
-            : DESIGN.red;
+  const priceX = price != null ? xToSvg(clamp(price, model.rangeMin, model.rangeMax)) : null;
+  const pricePnl = price != null ? model.pnlAtPrice(price) : null;
+  const priceY = pricePnl != null ? yToSvg(pricePnl) : null;
 
   return (
     <div style={{ marginTop: "10px" }}>
-      <div style={{ display: "flex", gap: "12px", marginBottom: "6px", fontSize: "11px", flexWrap: "wrap" }}>
-        <span style={{ color: DESIGN.muted }}>
-          BE Range:{" "}
-          <span style={{ fontFamily: DESIGN.mono, fontWeight: 700, color: DESIGN.yellow }}>
-            ${condor.lowerBreakeven.toFixed(2)} - ${condor.upperBreakeven.toFixed(2)}
+      <div style={{ display: "flex", gap: "12px", marginBottom: "6px", fontSize: "12px", flexWrap: "wrap" }}>
+        {model.summary.map((line) => (
+          <span key={line} style={{ color: DESIGN.muted }}>
+            {line}
           </span>
-        </span>
-        <span style={{ color: DESIGN.muted }}>
-          Max-profit core:{" "}
-          <span style={{ fontFamily: DESIGN.mono, fontWeight: 700, color: DESIGN.green }}>
-            ${condor.lowerShort.toFixed(0)} - ${condor.upperShort.toFixed(0)}
-          </span>
-        </span>
+        ))}
         {price != null && (
-          <span style={{ color: zoneColor }}>
-            {inCore
-              ? "IN MAX PROFIT CORE"
-              : inProfit
-                ? `IN PROFIT ZONE (${((distanceToBe ?? 0) / price * 100).toFixed(1)}% cushion)`
-                : price < condor.lowerBreakeven
-                  ? `${((distanceToBe ?? 0) / price * 100).toFixed(1)}% below BE-L ($${(distanceToBe ?? 0).toFixed(2)} to reclaim)`
-                  : `${((distanceToBe ?? 0) / price * 100).toFixed(1)}% above BE-U ($${(distanceToBe ?? 0).toFixed(2)} to reclaim)`}
-          </span>
-        )}
-        {(stopDown != null || stopUp != null) && (
-          <span style={{ color: DESIGN.red, fontSize: "10px" }}>
-            Stops: {stopDown != null ? `$${stopDown.toFixed(2)}` : "—"} / {stopUp != null ? `$${stopUp.toFixed(2)}` : "—"}
+          <span style={{ color: pricePnl != null && pricePnl >= 0 ? DESIGN.green : DESIGN.red }}>
+            Est. payoff now:{" "}
+            <span style={{ fontFamily: DESIGN.mono, fontWeight: 700 }}>
+              {pricePnl != null ? `${pricePnl >= 0 ? "+" : "-"}$${Math.abs(pricePnl).toFixed(2)}` : "—"}
+            </span>
           </span>
         )}
       </div>
 
       <div
         style={{
-          position: "relative",
-          height: "30px",
-          borderRadius: "4px",
+          borderRadius: "8px",
           overflow: "hidden",
-          background: "rgba(255,255,255,0.02)",
           border: `1px solid ${DESIGN.cardBorder}`,
+          background:
+            "linear-gradient(180deg, rgba(74,222,128,0.05) 0%, rgba(74,222,128,0.03) 48%, rgba(248,113,113,0.04) 52%, rgba(248,113,113,0.07) 100%)",
         }}
       >
-        <div style={{ position: "absolute", left: 0, width: `${lowerWingPct}%`, height: "100%", background: "rgba(239,68,68,0.14)" }} />
-        <div
-          style={{
-            position: "absolute",
-            left: `${lowerWingPct}%`,
-            width: `${Math.max(0, lowerBEPct - lowerWingPct)}%`,
-            height: "100%",
-            background: "rgba(250,204,21,0.12)",
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: `${lowerBEPct}%`,
-            width: `${Math.max(0, lowerShortPct - lowerBEPct)}%`,
-            height: "100%",
-            background: "rgba(74,222,128,0.12)",
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: `${lowerShortPct}%`,
-            width: `${Math.max(0, upperShortPct - lowerShortPct)}%`,
-            height: "100%",
-            background: "rgba(74,222,128,0.25)",
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: `${upperShortPct}%`,
-            width: `${Math.max(0, upperBEPct - upperShortPct)}%`,
-            height: "100%",
-            background: "rgba(74,222,128,0.12)",
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: `${upperBEPct}%`,
-            width: `${Math.max(0, upperWingPct - upperBEPct)}%`,
-            height: "100%",
-            background: "rgba(250,204,21,0.12)",
-          }}
-        />
-        <div style={{ position: "absolute", left: `${upperWingPct}%`, right: 0, height: "100%", background: "rgba(239,68,68,0.14)" }} />
+        <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="170" preserveAspectRatio="none">
+          <line x1={padX} y1={zeroY} x2={width - padX} y2={zeroY} stroke="rgba(255,255,255,0.2)" strokeDasharray="4 4" />
 
-        {stopDownPct != null && (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                left: `${stopDownPct}%`,
-                top: 0,
-                bottom: 0,
-                width: "2px",
-                background: DESIGN.red,
-                opacity: 0.8,
-              }}
-            />
-            <div
-              style={{
-                position: "absolute",
-                left: `${stopDownPct}%`,
-                top: "1px",
-                fontSize: "9px",
-                color: DESIGN.red,
-                fontWeight: 700,
-                transform: "translateX(-50%)",
-              }}
-            >
-              STOP
-            </div>
-          </>
-        )}
-        {stopUpPct != null && (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                left: `${stopUpPct}%`,
-                top: 0,
-                bottom: 0,
-                width: "2px",
-                background: DESIGN.red,
-                opacity: 0.8,
-              }}
-            />
-            <div
-              style={{
-                position: "absolute",
-                left: `${stopUpPct}%`,
-                top: "1px",
-                fontSize: "9px",
-                color: DESIGN.red,
-                fontWeight: 700,
-                transform: "translateX(-50%)",
-              }}
-            >
-              STOP
-            </div>
-          </>
-        )}
+          {points.slice(0, -1).map((point, index) => {
+            const next = points[index + 1];
+            const x1 = xToSvg(point.x);
+            const y1 = yToSvg(point.pnl);
+            const x2 = xToSvg(next.x);
+            const y2 = yToSvg(next.pnl);
+            const mid = (point.pnl + next.pnl) / 2;
+            const stroke = mid >= 0 ? DESIGN.green : DESIGN.red;
+            return <line key={`${index}-${point.x}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={stroke} strokeWidth="2.5" />;
+          })}
 
-        <div style={{ position: "absolute", left: `${lowerWingPct}%`, top: 0, bottom: 0, width: "1px", background: "rgba(255,255,255,0.3)" }} />
-        <div style={{ position: "absolute", left: `${upperWingPct}%`, top: 0, bottom: 0, width: "1px", background: "rgba(255,255,255,0.3)" }} />
-        <div style={{ position: "absolute", left: `${lowerShortPct}%`, top: 0, bottom: 0, width: "1px", background: `${DESIGN.green}aa` }} />
-        <div style={{ position: "absolute", left: `${upperShortPct}%`, top: 0, bottom: 0, width: "1px", background: `${DESIGN.green}aa` }} />
-        <div style={{ position: "absolute", left: `${lowerBEPct}%`, top: 0, bottom: 0, width: "2px", background: DESIGN.yellow, opacity: 0.85 }} />
-        <div style={{ position: "absolute", left: `${upperBEPct}%`, top: 0, bottom: 0, width: "2px", background: DESIGN.yellow, opacity: 0.85 }} />
+          {markers.map((marker) => (
+            <g key={`${marker.label}-${marker.value}`}>
+              <line x1={marker.x} y1={padY} x2={marker.x} y2={height - padY} stroke={marker.color} strokeOpacity="0.7" />
+              <text
+                x={marker.x}
+                y={padY + 10}
+                fill={marker.color}
+                fontSize="10"
+                fontFamily={DESIGN.mono}
+                textAnchor="middle"
+                fontWeight="700"
+              >
+                {marker.label}
+              </text>
+              <text
+                x={marker.x}
+                y={height - 6}
+                fill={DESIGN.muted}
+                fontSize="10"
+                fontFamily={DESIGN.mono}
+                textAnchor="middle"
+              >
+                {formatPrice(marker.value)}
+              </text>
+            </g>
+          ))}
 
-        <div
-          style={{
-            position: "absolute",
-            left: `${lowerBEPct}%`,
-            top: "1px",
-            fontSize: "8px",
-            color: DESIGN.yellow,
-            fontWeight: 700,
-            fontFamily: DESIGN.mono,
-            transform: "translateX(-50%)",
-          }}
-        >
-          BE-L
-        </div>
-        <div
-          style={{
-            position: "absolute",
-            left: `${upperBEPct}%`,
-            top: "1px",
-            fontSize: "8px",
-            color: DESIGN.yellow,
-            fontWeight: 700,
-            fontFamily: DESIGN.mono,
-            transform: "translateX(-50%)",
-          }}
-        >
-          BE-U
-        </div>
-
-        <div
-          style={{
-            position: "absolute",
-            left: `${lowerWingPct}%`,
-            bottom: "1px",
-            fontSize: "8px",
-            color: DESIGN.muted,
-            fontFamily: DESIGN.mono,
-            transform: "translateX(-50%)",
-          }}
-        >
-          {condor.lowerWing}
-        </div>
-        <div
-          style={{
-            position: "absolute",
-            left: `${lowerShortPct}%`,
-            bottom: "1px",
-            fontSize: "8px",
-            color: DESIGN.green,
-            fontFamily: DESIGN.mono,
-            transform: "translateX(-50%)",
-          }}
-        >
-          {condor.lowerShort}
-        </div>
-        <div
-          style={{
-            position: "absolute",
-            left: `${upperShortPct}%`,
-            bottom: "1px",
-            fontSize: "8px",
-            color: DESIGN.green,
-            fontFamily: DESIGN.mono,
-            transform: "translateX(-50%)",
-          }}
-        >
-          {condor.upperShort}
-        </div>
-        <div
-          style={{
-            position: "absolute",
-            left: `${upperWingPct}%`,
-            bottom: "1px",
-            fontSize: "8px",
-            color: DESIGN.muted,
-            fontFamily: DESIGN.mono,
-            transform: "translateX(-50%)",
-          }}
-        >
-          {condor.upperWing}
-        </div>
-
-        {pricePct != null && (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                left: `${pricePct}%`,
-                top: "50%",
-                transform: "translate(-50%, -50%)",
-                width: "9px",
-                height: "9px",
-                borderRadius: "50%",
-                background: zoneColor,
-                border: "2px solid #fff",
-                boxShadow: `0 0 8px ${zoneColor}`,
-                zIndex: 10,
-              }}
-            />
-            <div
-              style={{
-                position: "absolute",
-                left: `${pricePct}%`,
-                top: "-1px",
-                transform: "translateX(-50%)",
-                fontSize: "9px",
-                fontWeight: 700,
-                fontFamily: DESIGN.mono,
-                color: DESIGN.bright,
-                zIndex: 10,
-                background: "rgba(0,0,0,0.7)",
-                padding: "0 3px",
-                borderRadius: "2px",
-              }}
-            >
-              ${price?.toFixed(0)}
-            </div>
-          </>
-        )}
+          {priceX != null && priceY != null && (
+            <g>
+              <circle
+                cx={priceX}
+                cy={priceY}
+                r="5"
+                fill={pricePnl != null && pricePnl >= 0 ? DESIGN.green : DESIGN.red}
+                stroke="#fff"
+                strokeWidth="2"
+              />
+              <text
+                x={priceX}
+                y={Math.max(padY + 12, priceY - 10)}
+                fill={DESIGN.bright}
+                fontSize="11"
+                fontFamily={DESIGN.mono}
+                textAnchor="middle"
+                fontWeight="700"
+              >
+                ${price?.toFixed(2)}
+              </text>
+            </g>
+          )}
+        </svg>
       </div>
 
-      <div style={{ display: "flex", gap: "12px", marginTop: "4px", fontSize: "9px", color: DESIGN.muted, flexWrap: "wrap" }}>
-        <span>{swatch("rgba(239,68,68,0.25)")}Max Loss</span>
-        <span>{swatch("rgba(250,204,21,0.25)")}Recovery Zone</span>
-        <span>{swatch("rgba(74,222,128,0.25)")}Profit Zone</span>
-        <span>{swatch("rgba(74,222,128,0.45)")}Max Profit Core</span>
+      <div style={{ display: "flex", gap: "14px", marginTop: "4px", fontSize: "10px", color: DESIGN.muted, flexWrap: "wrap" }}>
+        <span>
+          <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "50%", background: DESIGN.green, marginRight: "4px" }} />
+          Profit zone
+        </span>
+        <span>
+          <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "50%", background: DESIGN.red, marginRight: "4px" }} />
+          Loss zone
+        </span>
+        <span>Dotted line: breakeven/payoff zero</span>
       </div>
     </div>
   );
