@@ -244,18 +244,6 @@ async function fetchYahooTicker(ticker: string): Promise<number | null> {
   return parseYahooPrice(json);
 }
 
-async function fetchAlphaVantageTicker(ticker: string, key: string): Promise<number | null> {
-  if (!key) return null;
-  const url = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(ticker)}&apikey=${encodeURIComponent(key)}`;
-  const resp = await fetch(url, { cache: "no-store" });
-  if (!resp.ok) return null;
-  const json = (await resp.json()) as { "Global Quote"?: { "05. price"?: string } };
-  const raw = json["Global Quote"]?.["05. price"];
-  if (!raw) return null;
-  const price = Number(raw);
-  return Number.isFinite(price) ? price : null;
-}
-
 async function fetchMassiveTicker(ticker: string, config: MassiveConfig): Promise<number | null> {
   const { apiKey, baseUrl } = config;
   if (!apiKey) return null;
@@ -490,7 +478,7 @@ export async function fetchLivePrices(
   settings: DashboardSettings,
 ): Promise<PriceResponse> {
   const uniqueTickers = [...new Set(tickers.map((t) => t.trim().toUpperCase()).filter(Boolean))];
-  const source = settings.price_api;
+  const source = settings.price_api === "manual" ? "manual" : "yahoo";
   const massiveConfig = resolveMassiveConfig();
 
   const entries = await Promise.all(
@@ -509,20 +497,9 @@ export async function fetchLivePrices(
         }
       }
 
-      if (price == null && source === "yahoo") {
+      if (price == null) {
         price = await fetchYahooTicker(ticker);
-        if (price == null && settings.alpha_vantage_key) {
-          price = await fetchAlphaVantageTicker(ticker, settings.alpha_vantage_key);
-          used = "alphavantage";
-        }
-      }
-
-      if (price == null && source === "alphavantage") {
-        price = await fetchAlphaVantageTicker(ticker, settings.alpha_vantage_key);
-        if (price == null) {
-          price = await fetchYahooTicker(ticker);
-          used = "yahoo";
-        }
+        used = "yahoo";
       }
 
       if (price == null) return [ticker, null] as const;
@@ -614,7 +591,7 @@ export async function fetchLiveOptionQuotes(
       }
     }
 
-    // Optional fallback: if user selected AlphaVantage and no option quote providers succeeded.
+    // No further provider fallback for option quotes.
     void settings;
   }
 

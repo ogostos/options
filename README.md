@@ -26,7 +26,7 @@ Private single-user trading dashboard built with Next.js App Router and designed
   - JSON export backup
   - reset + reseed
 - Live price proxy API:
-  - `/api/prices` (Yahoo + AlphaVantage fallback)
+  - `/api/prices` (Massive primary + Yahoo fallback)
 
 ## Environment Variables
 
@@ -36,7 +36,6 @@ Copy `.env.example` and set:
 DATABASE_URL=postgresql://...
 MASSIVE_API_KEY=... # optional, primary source for stocks + options
 MASSIVE_API_BASE_URL=https://api.massive.com # optional override
-ALPHA_VANTAGE_KEY=... # optional
 ```
 
 ## Local Run

@@ -10,8 +10,7 @@ import type { DashboardSettings } from "@/lib/types";
 export default function SettingsPage() {
   const [settings, setSettings] = useState<DashboardSettings | null>(null);
   const [interestRate, setInterestRate] = useState("");
-  const [priceApi, setPriceApi] = useState<"yahoo" | "alphavantage" | "manual">("yahoo");
-  const [alphaKey, setAlphaKey] = useState("");
+  const [priceApi, setPriceApi] = useState<"yahoo" | "manual">("yahoo");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -32,8 +31,7 @@ export default function SettingsPage() {
 
         setSettings(data.settings);
         setInterestRate(String(data.settings.interest_rate_est));
-        setPriceApi(data.settings.price_api);
-        setAlphaKey(data.settings.alpha_vantage_key || "");
+        setPriceApi(data.settings.price_api === "manual" ? "manual" : "yahoo");
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Failed to load settings");
       }
@@ -54,7 +52,6 @@ export default function SettingsPage() {
         body: JSON.stringify({
           interest_rate_est: Number(interestRate) || 0,
           price_api: priceApi,
-          alpha_vantage_key: alphaKey,
         }),
       });
 
@@ -158,28 +155,18 @@ export default function SettingsPage() {
               </label>
               <select
                 value={priceApi}
-                onChange={(event) => setPriceApi(event.target.value as "yahoo" | "alphavantage" | "manual")}
+                onChange={(event) => setPriceApi(event.target.value as "yahoo" | "manual")}
                 style={{ width: "100%", background: "rgba(0,0,0,0.45)", color: DESIGN.text, border: `1px solid ${DESIGN.cardBorder}`, borderRadius: "6px", padding: "8px 10px", fontSize: "13px" }}
               >
-                <option value="yahoo">Yahoo Finance (unofficial)</option>
-                <option value="alphavantage">Alpha Vantage</option>
+                <option value="yahoo">Automatic (Massive → Yahoo fallback)</option>
                 <option value="manual">Manual Only</option>
               </select>
             </div>
           </div>
 
           <div style={{ marginTop: "10px" }}>
-            <label style={{ display: "block", fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase", marginBottom: "5px" }}>
-              Alpha Vantage Key (optional)
-            </label>
-            <input
-              value={alphaKey}
-              onChange={(event) => setAlphaKey(event.target.value)}
-              type="text"
-              style={{ width: "100%", background: "rgba(0,0,0,0.45)", color: DESIGN.text, border: `1px solid ${DESIGN.cardBorder}`, borderRadius: "6px", padding: "8px 10px", fontSize: "13px" }}
-            />
             <div style={{ marginTop: "6px", fontSize: "11px", color: DESIGN.muted }}>
-              If `MASSIVE_API_KEY` (or `POLYGON_API_KEY`) is set in env, Massive/Polygon quotes are used first for stocks and option legs.
+              Massive is primary. If `MASSIVE_API_KEY` (or `POLYGON_API_KEY`) is set, stock and option legs query Massive first, then Yahoo fallback.
             </div>
           </div>
 
