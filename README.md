@@ -36,6 +36,7 @@ Copy `.env.example` and set:
 DATABASE_URL=postgresql://...
 MASSIVE_API_KEY=... # optional, primary source for stocks + options
 MASSIVE_API_BASE_URL=https://api.massive.com # optional override
+IBKR_SYNC_TOKEN=... # optional, required for local IBKR panel -> app sync endpoint
 ```
 
 ## Local Run
@@ -54,6 +55,26 @@ npm run typecheck
 npm run lint
 npm run build
 ```
+
+## IBKR Local Sync Panel
+
+Run a local control panel that wraps CPGW startup, auth checks, preview fetch, and explicit sync-to-DB:
+
+```bash
+npm run ibkr:panel
+```
+
+Default panel URL: `http://localhost:8913`
+
+Expected local env variables for the panel process:
+
+- `IBKR_CPGW_BIN_DIR` (default: `/Users/kmarkosyan/Downloads/clientportal.gw/bin`)
+- `IBKR_CPGW_CONF` (optional override)
+- `IBKR_CPGW_BASE_URL` (default: `https://localhost:5000/v1/api`)
+- `IBKR_ACCOUNT_ID` (default: `U18542108`)
+- `IBKR_PANEL_PORT` (default: `8913`)
+- `IBKR_APP_SYNC_URL` (example: `https://<your-vercel-app>/api/ibkr-sync`)
+- `IBKR_SYNC_TOKEN` (must match app env `IBKR_SYNC_TOKEN`)
 
 ## Deploy (Vercel)
 

@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test lib/scoring.test.mjs"
+    "test": "node --experimental-strip-types --test lib/scoring.test.mjs",
+    "ibkr:panel": "node scripts/ibkr-control-panel.mjs"
   },
   "dependencies": {
     "@vercel/postgres": "^0.10.0",

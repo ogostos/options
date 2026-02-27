@@ -172,6 +172,8 @@ export function Dashboard() {
             {[
               ["/trades/new", "+ Add Trade"],
               ["/import", "Import PDF"],
+              ["/ibkr", "IBKR Live"],
+              ["/ibkr-sync", "IBKR Sync"],
               ["/settings", "Settings"],
             ].map(([href, label]) => (
               <Link

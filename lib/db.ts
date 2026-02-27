@@ -10,6 +10,8 @@ import {
 import type {
   AccountSnapshot,
   DashboardSettings,
+  IbkrSyncPayload,
+  IbkrSyncSnapshot,
   JournalEntry,
   Rule,
   StockPosition,
@@ -179,6 +181,35 @@ function mapSettingsRow(row: Record<string, unknown>): DashboardSettings {
     interest_rate_est: toNum(row.interest_rate_est),
     price_api: String(row.price_api) as DashboardSettings["price_api"],
     alpha_vantage_key: String(row.alpha_vantage_key ?? ""),
+  };
+}
+
+function parseJsonValue<T>(value: unknown, fallback: T): T {
+  if (value == null) return fallback;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return fallback;
+    }
+  }
+  if (typeof value === "object") {
+    return value as T;
+  }
+  return fallback;
+}
+
+function mapIbkrSnapshotRow(row: Record<string, unknown>): IbkrSyncSnapshot {
+  return {
+    id: Number(row.id),
+    created_at: String(row.created_at),
+    account_id: String(row.account_id),
+    source: String(row.source ?? "cpgw-local"),
+    fetched_at: String(row.fetched_at),
+    summary: parseJsonValue<Record<string, unknown>>(row.summary, {}),
+    positions: parseJsonValue<IbkrSyncSnapshot["positions"]>(row.positions, []),
+    trades: parseJsonValue<IbkrSyncSnapshot["trades"]>(row.trades, []),
+    notes: parseJsonValue<string[]>(row.notes, []),
   };
 }
 
@@ -414,6 +445,21 @@ export async function ensureDb() {
           notes TEXT NOT NULL DEFAULT ''
         );
       `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS ibkr_sync_snapshots (
+          id SERIAL PRIMARY KEY,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          account_id TEXT NOT NULL,
+          source TEXT NOT NULL DEFAULT 'cpgw-local',
+          fetched_at TIMESTAMPTZ NOT NULL,
+          summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+          positions JSONB NOT NULL DEFAULT '[]'::jsonb,
+          trades JSONB NOT NULL DEFAULT '[]'::jsonb,
+          notes JSONB NOT NULL DEFAULT '[]'::jsonb
+        );
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS idx_ibkr_sync_created_at ON ibkr_sync_snapshots(created_at DESC);`;
 
       const tradesCountResult = await sql`SELECT COUNT(*)::int AS count FROM trades;`;
       if (Number(tradesCountResult.rows[0]?.count ?? 0) === 0) {
@@ -865,20 +911,71 @@ export async function updateSettings(payload: Partial<DashboardSettings>): Promi
   return mapSettingsRow(result.rows[0]);
 }
 
+export async function insertIbkrSyncSnapshot(payload: IbkrSyncPayload): Promise<IbkrSyncSnapshot> {
+  await ensureDb();
+  const fetchedAt = payload.fetched_at ? new Date(payload.fetched_at) : new Date();
+  const normalizedFetchedAt = Number.isNaN(fetchedAt.getTime()) ? new Date() : fetchedAt;
+
+  const result = await sql`
+    INSERT INTO ibkr_sync_snapshots (
+      account_id,
+      source,
+      fetched_at,
+      summary,
+      positions,
+      trades,
+      notes
+    ) VALUES (
+      ${payload.account_id},
+      ${payload.source || "cpgw-local"},
+      ${normalizedFetchedAt.toISOString()},
+      ${JSON.stringify(payload.summary ?? {})}::jsonb,
+      ${JSON.stringify(payload.positions ?? [])}::jsonb,
+      ${JSON.stringify(payload.trades ?? [])}::jsonb,
+      ${JSON.stringify(payload.notes ?? [])}::jsonb
+    )
+    RETURNING *;
+  `;
+  return mapIbkrSnapshotRow(result.rows[0]);
+}
+
+export async function getLatestIbkrSyncSnapshot(): Promise<IbkrSyncSnapshot | null> {
+  await ensureDb();
+  const result = await sql`
+    SELECT * FROM ibkr_sync_snapshots
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1;
+  `;
+  if (!result.rowCount) return null;
+  return mapIbkrSnapshotRow(result.rows[0]);
+}
+
+export async function listIbkrSyncSnapshots(limit = 25): Promise<IbkrSyncSnapshot[]> {
+  await ensureDb();
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+  const result = await sql`
+    SELECT * FROM ibkr_sync_snapshots
+    ORDER BY created_at DESC, id DESC
+    LIMIT ${safeLimit};
+  `;
+  return result.rows.map((row) => mapIbkrSnapshotRow(row));
+}
+
 export async function resetAllData() {
   await ensureDb();
-  await sql`TRUNCATE TABLE journal_entries, trades, rules, stock_positions, settings, account_snapshots RESTART IDENTITY CASCADE;`;
+  await sql`TRUNCATE TABLE journal_entries, trades, rules, stock_positions, settings, account_snapshots, ibkr_sync_snapshots RESTART IDENTITY CASCADE;`;
   await seedDatabase();
 }
 
 export async function exportAllData() {
-  const [account, trades, rules, journals, settings, stocks] = await Promise.all([
+  const [account, trades, rules, journals, settings, stocks, ibkrSnapshots] = await Promise.all([
     getLatestAccountSnapshot(),
     listTrades(),
     listRules(),
     listJournalEntries(),
     getSettings(),
     listStockPositions(),
+    listIbkrSyncSnapshots(100),
   ]);
 
   return {
@@ -888,6 +985,7 @@ export async function exportAllData() {
     journal_entries: journals,
     settings,
     stock_positions: stocks,
+    ibkr_sync_snapshots: ibkrSnapshots,
     exported_at: new Date().toISOString(),
   };
 }

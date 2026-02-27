@@ -272,3 +272,44 @@ export interface PortfolioRuleChecks {
   earningsConcentrationPass: boolean;
   earningsCount: number;
 }
+
+export interface IbkrPositionRecord {
+  symbol: string;
+  contract: string;
+  conid: number | null;
+  quantity: number;
+  market_price: number | null;
+  market_value: number | null;
+  average_cost: number | null;
+  unrealized_pl: number | null;
+  realized_pl: number | null;
+  currency: string | null;
+  raw: Record<string, unknown>;
+}
+
+export interface IbkrTradeRecord {
+  trade_id: string | null;
+  symbol: string;
+  side: string | null;
+  quantity: number;
+  price: number | null;
+  commission: number | null;
+  trade_time: string | null;
+  conid: number | null;
+  raw: Record<string, unknown>;
+}
+
+export interface IbkrSyncPayload {
+  account_id: string;
+  source: string;
+  fetched_at: string;
+  summary: Record<string, unknown>;
+  positions: IbkrPositionRecord[];
+  trades: IbkrTradeRecord[];
+  notes: string[];
+}
+
+export interface IbkrSyncSnapshot extends IbkrSyncPayload {
+  id: number;
+  created_at: string;
+}
