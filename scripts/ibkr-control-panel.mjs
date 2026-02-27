@@ -11,12 +11,14 @@ const PANEL_PORT = Number(process.env.IBKR_PANEL_PORT ?? 8913);
 const DEFAULT_BIN_DIR = "/Users/kmarkosyan/Downloads/clientportal.gw/bin";
 const CPGW_BIN_DIR = process.env.IBKR_CPGW_BIN_DIR ?? DEFAULT_BIN_DIR;
 const CPGW_RUN_SH = path.join(CPGW_BIN_DIR, "run.sh");
-const CPGW_CONF = process.env.IBKR_CPGW_CONF ?? path.resolve(CPGW_BIN_DIR, "../root/conf.yaml");
+const CPGW_HOME_DIR = path.resolve(CPGW_BIN_DIR, "..");
+const CPGW_CONF_INPUT = process.env.IBKR_CPGW_CONF ?? "root/conf.yaml";
 const CPGW_BASE = process.env.IBKR_CPGW_BASE_URL ?? "https://localhost:5000/v1/api";
 const CPGW_LOGIN_URL = process.env.IBKR_CPGW_LOGIN_URL ?? "https://localhost:5000";
 const DEFAULT_ACCOUNT_ID = process.env.IBKR_ACCOUNT_ID ?? "U18542108";
 const APP_SYNC_URL = process.env.IBKR_APP_SYNC_URL ?? "";
 const APP_SYNC_TOKEN = process.env.IBKR_SYNC_TOKEN ?? "";
+const PANEL_AUTO_OPEN = process.env.IBKR_PANEL_AUTO_OPEN === "1";
 
 const state = {
   gatewayProcess: null,
@@ -43,6 +45,26 @@ function sendJson(res, status, payload) {
     "cache-control": "no-store",
   });
   res.end(JSON.stringify(payload));
+}
+
+function normalizeConfArg(input) {
+  const trimmed = String(input ?? "").trim();
+  if (!trimmed) return "root/conf.yaml";
+
+  if (!path.isAbsolute(trimmed)) {
+    return trimmed;
+  }
+
+  const relative = path.relative(CPGW_HOME_DIR, trimmed);
+  if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+    return relative || "root/conf.yaml";
+  }
+
+  return trimmed;
+}
+
+function terminalHyperlink(url, label = url) {
+  return `\u001B]8;;${url}\u0007${label}\u001B]8;;\u0007`;
 }
 
 async function readBody(req) {
@@ -185,12 +207,13 @@ function startGateway() {
     return { ok: true, message: "Gateway already running." };
   }
 
-  const proc = spawn(CPGW_RUN_SH, [CPGW_CONF], {
-    cwd: path.resolve(CPGW_BIN_DIR, ".."),
+  const confArg = normalizeConfArg(CPGW_CONF_INPUT);
+  const proc = spawn(CPGW_RUN_SH, [confArg], {
+    cwd: CPGW_HOME_DIR,
     stdio: ["ignore", "pipe", "pipe"],
   });
   state.gatewayProcess = proc;
-  pushLog(`Starting CPGW: ${CPGW_RUN_SH} ${CPGW_CONF}`);
+  pushLog(`Starting CPGW: ${CPGW_RUN_SH} ${confArg}`);
 
   proc.stdout?.on("data", (chunk) => pushLog(`[cpgw] ${String(chunk).trim()}`));
   proc.stderr?.on("data", (chunk) => pushLog(`[cpgw:err] ${String(chunk).trim()}`));
@@ -321,7 +344,7 @@ function html() {
         <button class="btn gray" id="btnCheck">Check Session</button>
       </div>
       <div class="muted" style="margin-top:8px;">
-        Bin: <span class="mono">${CPGW_BIN_DIR}</span> · Conf: <span class="mono">${CPGW_CONF}</span>
+        Bin: <span class="mono">${CPGW_BIN_DIR}</span> · Conf: <span class="mono">${normalizeConfArg(CPGW_CONF_INPUT)}</span>
       </div>
     </div>
 
@@ -542,7 +565,26 @@ const server = http.createServer(async (req, res) => {
   sendJson(res, 404, { error: "Not found" });
 });
 
+function openBrowser(url) {
+  const platform = process.platform;
+  if (platform === "darwin") {
+    spawn("open", [url], { stdio: "ignore", detached: true }).unref();
+    return;
+  }
+  if (platform === "win32") {
+    spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true }).unref();
+    return;
+  }
+  spawn("xdg-open", [url], { stdio: "ignore", detached: true }).unref();
+}
+
 server.listen(PANEL_PORT, () => {
-  pushLog(`Panel listening on http://localhost:${PANEL_PORT}`);
-  console.log(`IBKR control panel running at http://localhost:${PANEL_PORT}`);
+  const url = `http://localhost:${PANEL_PORT}`;
+  pushLog(`Panel listening on ${url}`);
+  console.log(`IBKR control panel running at ${url}`);
+  console.log(`Open panel: ${terminalHyperlink(url)}`);
+  if (PANEL_AUTO_OPEN) {
+    openBrowser(url);
+    console.log("Browser auto-open enabled (IBKR_PANEL_AUTO_OPEN=1).");
+  }
 });
