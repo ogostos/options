@@ -961,6 +961,14 @@ export async function listIbkrSyncSnapshots(limit = 25): Promise<IbkrSyncSnapsho
   return result.rows.map((row) => mapIbkrSnapshotRow(row));
 }
 
+export async function clearIbkrSyncSnapshots(): Promise<number> {
+  await ensureDb();
+  const countResult = await sql`SELECT COUNT(*)::int AS count FROM ibkr_sync_snapshots;`;
+  const count = Number(countResult.rows[0]?.count ?? 0);
+  await sql`TRUNCATE TABLE ibkr_sync_snapshots RESTART IDENTITY;`;
+  return count;
+}
+
 export async function resetAllData() {
   await ensureDb();
   await sql`TRUNCATE TABLE journal_entries, trades, rules, stock_positions, settings, account_snapshots, ibkr_sync_snapshots RESTART IDENTITY CASCADE;`;

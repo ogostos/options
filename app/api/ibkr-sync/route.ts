@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getLatestIbkrSyncSnapshot, insertIbkrSyncSnapshot } from "@/lib/db";
+import { clearIbkrSyncSnapshots, getLatestIbkrSyncSnapshot, insertIbkrSyncSnapshot } from "@/lib/db";
 import type { IbkrSyncPayload } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -114,6 +114,33 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "IBKR sync failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const expected = process.env.IBKR_SYNC_TOKEN?.trim() ?? "";
+    if (!expected) {
+      return NextResponse.json(
+        { error: "IBKR_SYNC_TOKEN is not configured on the app." },
+        { status: 500 },
+      );
+    }
+
+    const provided = readToken(request);
+    if (!provided || provided !== expected) {
+      return NextResponse.json({ error: "Unauthorized sync token." }, { status: 401 });
+    }
+
+    const removed = await clearIbkrSyncSnapshots();
+    return NextResponse.json({
+      ok: true,
+      removed,
+      message: "Cleared ibkr_sync_snapshots only.",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to clear IBKR snapshots";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

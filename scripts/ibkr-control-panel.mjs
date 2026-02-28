@@ -473,6 +473,30 @@ async function syncPreview(preview, body = {}) {
   return resp.data;
 }
 
+async function clearRemoteIbkrDb(body = {}) {
+  const appSyncUrl = String(body.appSyncUrl ?? APP_SYNC_URL).trim();
+  const token = String(body.token ?? APP_SYNC_TOKEN).trim();
+  if (!appSyncUrl) {
+    throw new Error("IBKR_APP_SYNC_URL is not configured.");
+  }
+  if (!token) {
+    throw new Error("IBKR_SYNC_TOKEN is not configured.");
+  }
+
+  const resp = await fetchJson(appSyncUrl, {
+    method: "DELETE",
+    headers: {
+      "x-ibkr-sync-token": token,
+    },
+  });
+  if (!resp.ok) {
+    const message =
+      typeof resp.data?.error === "string" ? resp.data.error : `Clear failed (${resp.status})`;
+    throw new Error(message);
+  }
+  return resp.data;
+}
+
 async function runAutoSyncCycle(force = false) {
   if ((!state.autoSync.enabled && !force) || state.autoSync.inFlight) return;
   state.autoSync.inFlight = true;
@@ -579,7 +603,8 @@ function html() {
         <button class="btn green" id="btnFetch">Fetch Live Preview</button>
         <button class="btn gray" id="btnFetchHistory">Fetch Full History</button>
         <button class="btn green" id="btnSync">Sync To DB</button>
-        <span class="muted">Sync uses current preview only. Auto-sync fetches summary + positions (no trades).</span>
+        <button class="btn red" id="btnClearResync">Clear IBKR DB + Full Resync</button>
+        <span class="muted">Sync does fetch+sync. Auto-sync fetches summary + positions (no trades).</span>
       </div>
       <div id="previewMeta" class="muted" style="margin-top:8px;">No preview loaded.</div>
     </div>
@@ -626,6 +651,7 @@ function html() {
     const btnFetch = document.getElementById("btnFetch");
     const btnFetchHistory = document.getElementById("btnFetchHistory");
     const btnSync = document.getElementById("btnSync");
+    const btnClearResync = document.getElementById("btnClearResync");
     const autoSyncState = document.getElementById("autoSyncState");
     const autoSyncHeartbeat = document.getElementById("autoSyncHeartbeat");
     const autoSyncMeta = document.getElementById("autoSyncMeta");
@@ -655,6 +681,7 @@ function html() {
       btnFetch.disabled = !ok;
       btnFetchHistory.disabled = !ok;
       btnSync.disabled = !ok;
+      btnClearResync.disabled = !ok;
       btnAutoRun.disabled = !ok;
 
       const auto = status.auto_sync || {};
@@ -685,6 +712,7 @@ function html() {
         btnFetch.disabled = true;
         btnFetchHistory.disabled = true;
         btnSync.disabled = true;
+        btnClearResync.disabled = true;
         btnAutoRun.disabled = true;
         btnAutoToggle.disabled = true;
       }
@@ -715,6 +743,7 @@ function html() {
         btnFetch.disabled = true;
         btnFetchHistory.disabled = true;
         btnSync.disabled = true;
+        btnClearResync.disabled = true;
         btnAutoRun.disabled = true;
         btnAutoToggle.disabled = true;
         autoSyncMeta.textContent = "Stopping panel and CPGW...";
@@ -774,6 +803,33 @@ function html() {
           previewMeta.textContent =
             (mode === "history" ? "History" : "Live") +
             " sync complete: " +
+            data.preview.positions.length +
+            " positions, " +
+            data.preview.trades.length +
+            " trades.";
+        }
+      } catch (e) {
+        alert(String(e.message || e));
+      }
+      await refreshStatus();
+    };
+
+    btnClearResync.onclick = async () => {
+      const confirmed = window.confirm(
+        "This will clear only IBKR snapshots in app DB, then fetch full history and sync again. Continue?",
+      );
+      if (!confirmed) return;
+      try {
+        const data = await call("/api/clear-resync", "POST", {
+          accountId: document.getElementById("accountId").value.trim(),
+          days: Number(document.getElementById("days").value || "${YTD_DAYS}")
+        });
+        syncMode.value = "history";
+        syncOutput.textContent = JSON.stringify(data, null, 2);
+        if (data.preview) {
+          previewOutput.textContent = JSON.stringify(data.preview, null, 2);
+          previewMeta.textContent =
+            "Clear + full resync complete: " +
             data.preview.positions.length +
             " positions, " +
             data.preview.trades.length +
@@ -914,6 +970,26 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Sync failed";
       pushLog(`Sync error: ${message}`);
+      sendJson(res, 500, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/clear-resync") {
+    try {
+      const body = await readBody(req);
+      state.preferences.syncMode = "history";
+      const clearResponse = await clearRemoteIbkrDb(body);
+      pushLog(`Remote IBKR DB cleared (${clearResponse.removed ?? "?"} rows).`);
+      const preview = await buildPreview(body.accountId, body.days, {
+        includeTrades: true,
+      });
+      const response = await syncPreview(preview, body);
+      pushLog("Full history resync completed.");
+      sendJson(res, 200, { ok: true, clearResponse, preview, response });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Clear+resync failed";
+      pushLog(`Clear+resync error: ${message}`);
       sendJson(res, 500, { error: message });
     }
     return;
