@@ -180,6 +180,39 @@ function normalizeSummary(data) {
   return {};
 }
 
+function normalizeSummaryFromLedger(data) {
+  if (!data || typeof data !== "object") return {};
+  const obj = data;
+  const segment =
+    (obj.BASE && typeof obj.BASE === "object" ? obj.BASE : null) ??
+    (obj.USD && typeof obj.USD === "object" ? obj.USD : null) ??
+    (Object.values(obj).find((value) => value && typeof value === "object") ?? null);
+  if (!segment || typeof segment !== "object") return {};
+
+  const read = (...keys) => {
+    for (const key of keys) {
+      if (!(key in segment)) continue;
+      const value = toNum(segment[key]);
+      if (value != null) return value;
+    }
+    return null;
+  };
+
+  const merged = {};
+  const netLiq = read("netliquidationvalue", "netliquidation", "netliq");
+  const cash = read("cashbalance", "totalcashvalue", "cash");
+  const buyingPower = read("buyingpower", "buying_power");
+  const maint = read("maintmarginreq", "maint_margin_req", "maintmargin");
+  const excess = read("excessliquidity", "excess_liquidity");
+
+  if (netLiq != null) merged.netLiquidation = netLiq;
+  if (cash != null) merged.totalCashValue = cash;
+  if (buyingPower != null) merged.buyingPower = buyingPower;
+  if (maint != null) merged.maintMarginReq = maint;
+  if (excess != null) merged.excessLiquidity = excess;
+  return merged;
+}
+
 function normalizePositions(data) {
   if (!Array.isArray(data)) return [];
   return data.map((row) => {
@@ -352,6 +385,7 @@ async function buildPreview(accountIdInput, daysInput, options = {}) {
   }
 
   const summaryResp = await fetchJson(`${CPGW_BASE}/portfolio/${encodeURIComponent(accountId)}/summary`);
+  const ledgerResp = await fetchJson(`${CPGW_BASE}/portfolio/${encodeURIComponent(accountId)}/ledger`);
 
   let positionsResp = await fetchJson(`${CPGW_BASE}/portfolio2/${encodeURIComponent(accountId)}/positions`);
   if (!positionsResp.ok || !Array.isArray(positionsResp.data)) {
@@ -370,7 +404,11 @@ async function buildPreview(accountIdInput, daysInput, options = {}) {
     ? await fetchJson(`${CPGW_BASE}/iserver/account/trades?days=${days}`)
     : { ok: true, status: 200, data: [], error: null };
 
-  if (!summaryResp.ok) notes.push(`Summary request failed (${summaryResp.status}).`);
+  if (!summaryResp.ok && !ledgerResp.ok) {
+    notes.push(`Summary request failed (${summaryResp.status}); ledger failed (${ledgerResp.status}).`);
+  } else if (!summaryResp.ok && ledgerResp.ok) {
+    notes.push(`Summary request failed (${summaryResp.status}); using ledger fallback.`);
+  }
   if (!positionsResp.ok) notes.push(`Positions request failed (${positionsResp.status}).`);
   if (includeTrades) {
     if (!tradesResp.ok) notes.push(`Trades request failed (${tradesResp.status}).`);
@@ -378,22 +416,28 @@ async function buildPreview(accountIdInput, daysInput, options = {}) {
     notes.push("trades_skipped=1");
   }
 
-  const preview = {
+  const summary = {
+    ...normalizeSummary(summaryResp.data),
+    ...normalizeSummaryFromLedger(ledgerResp.data),
+  };
+
+      const preview = {
     account_id: accountId,
     source: "cpgw-local",
     fetched_at: nowIso(),
-    summary: normalizeSummary(summaryResp.data),
+    summary,
     positions: normalizePositions(positionsResp.data),
     trades: includeTrades ? normalizeTrades(tradesResp.data) : [],
     notes: includeTrades ? [...notes, `trades_days=${days}`] : notes,
-    meta: {
-      accounts,
-      endpoints: {
-        summary: `${CPGW_BASE}/portfolio/${accountId}/summary`,
-        positions: "portfolio2/positions fallback chain",
-        trades: includeTrades ? `${CPGW_BASE}/iserver/account/trades?days=${days}` : "skipped",
+      meta: {
+        accounts,
+        endpoints: {
+          summary: `${CPGW_BASE}/portfolio/${accountId}/summary`,
+          ledger: `${CPGW_BASE}/portfolio/${accountId}/ledger`,
+          positions: "portfolio2/positions fallback chain",
+          trades: includeTrades ? `${CPGW_BASE}/iserver/account/trades?days=${days}` : "skipped",
+        },
       },
-    },
   };
 
   state.preview = preview;
