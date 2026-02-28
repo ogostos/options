@@ -84,7 +84,21 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Payload too large." }, { status: 400 });
     }
 
-    const saved = await insertIbkrSyncSnapshot(payload);
+    let tradesToSave = payload.trades;
+    const notesToSave = [...payload.notes];
+    if (tradesToSave.length === 0) {
+      const latest = await getLatestIbkrSyncSnapshot();
+      if (latest && latest.account_id === payload.account_id && latest.trades.length > 0) {
+        tradesToSave = latest.trades;
+        notesToSave.push(`history_preserved=${latest.trades.length}`);
+      }
+    }
+
+    const saved = await insertIbkrSyncSnapshot({
+      ...payload,
+      trades: tradesToSave,
+      notes: notesToSave,
+    });
 
     return NextResponse.json({
       ok: true,

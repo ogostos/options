@@ -45,7 +45,7 @@ export function getIronCondorZone({
   maxProfit: number | null;
   contracts: number;
 }): IronCondorZone | null {
-  if (strategy !== "Iron Condor") return null;
+  if (strategy !== "Iron Condor" && strategy !== "Iron Butterfly") return null;
 
   const tokens = parseLegTokens(legs);
   if (tokens.length < 4) return null;

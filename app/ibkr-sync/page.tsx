@@ -65,7 +65,7 @@ export default function IbkrSyncPage() {
 
         <Card style={{ marginBottom: "10px" }}>
           <div style={{ fontSize: "12px", color: DESIGN.muted, marginBottom: "8px", lineHeight: 1.5 }}>
-            Run the local IBKR control panel on your machine, authenticate CPGW, fetch preview, then sync to DB.
+            Run the local IBKR control panel on your machine and authenticate CPGW. Auto-sync can run continuously from the panel, or you can fetch/sync manually.
           </div>
           <div style={{ fontSize: "12px", color: DESIGN.text, fontFamily: DESIGN.mono, marginBottom: "8px" }}>
             npm run ibkr:panel
@@ -74,7 +74,7 @@ export default function IbkrSyncPage() {
             Default local panel URL: <span style={{ color: DESIGN.blue, fontFamily: DESIGN.mono }}>http://localhost:8913</span>
           </div>
           <div style={{ marginTop: "6px", fontSize: "11px", color: DESIGN.yellow }}>
-            This page auto-refreshes status every 10 seconds. Fetch and sync actions happen in the local panel.
+            This page auto-refreshes status every 10 seconds. Sync actions run in the local panel.
           </div>
         </Card>
 

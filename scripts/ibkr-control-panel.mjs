@@ -19,12 +19,36 @@ const DEFAULT_ACCOUNT_ID = process.env.IBKR_ACCOUNT_ID ?? "U18542108";
 const APP_SYNC_URL = process.env.IBKR_APP_SYNC_URL ?? "";
 const APP_SYNC_TOKEN = process.env.IBKR_SYNC_TOKEN ?? "";
 const PANEL_AUTO_OPEN = process.env.IBKR_PANEL_AUTO_OPEN === "1";
+const now = new Date();
+const startOfYear = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+const YTD_DAYS = Math.max(1, Math.floor((Date.now() - startOfYear.getTime()) / (24 * 60 * 60 * 1000)) + 1);
+const DEFAULT_TRADES_DAYS = Number(process.env.IBKR_TRADES_DAYS ?? YTD_DAYS);
+const DEFAULT_AUTO_SYNC_SECONDS = Number(process.env.IBKR_AUTO_SYNC_SECONDS ?? 60);
+const AUTO_SYNC_CHOICES = [3, 10, 30, 60, 300, 600, 3600];
+const RESOLVED_DEFAULT_AUTO_SYNC_SECONDS = AUTO_SYNC_CHOICES.includes(DEFAULT_AUTO_SYNC_SECONDS) ? DEFAULT_AUTO_SYNC_SECONDS : 60;
+const DEFAULT_AUTO_SYNC_ENABLED =
+  process.env.IBKR_AUTO_SYNC_ENABLED === "1" &&
+  Boolean(APP_SYNC_URL.trim()) &&
+  Boolean(APP_SYNC_TOKEN.trim());
 
 const state = {
   gatewayProcess: null,
   preview: null,
   lastSyncResponse: null,
   logs: [],
+  preferences: {
+    accountId: DEFAULT_ACCOUNT_ID,
+    days: Number.isFinite(DEFAULT_TRADES_DAYS) ? Math.max(1, Math.min(3650, DEFAULT_TRADES_DAYS)) : YTD_DAYS,
+  },
+  autoSync: {
+    enabled: false,
+    intervalSeconds: RESOLVED_DEFAULT_AUTO_SYNC_SECONDS,
+    timer: null,
+    inFlight: false,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+  },
 };
 
 function nowIso() {
@@ -246,7 +270,8 @@ async function fetchAuthStatus() {
   };
 }
 
-async function buildPreview(accountIdInput, daysInput) {
+async function buildPreview(accountIdInput, daysInput, options = {}) {
+  const includeTrades = options.includeTrades !== false;
   const notes = [];
   const auth = await fetchAuthStatus();
   if (!auth.authenticated || !auth.connected) {
@@ -273,12 +298,22 @@ async function buildPreview(accountIdInput, daysInput) {
     positionsResp = await fetchJson(`${CPGW_BASE}/portfolio/${encodeURIComponent(accountId)}/positions/0`);
   }
 
-  const days = Number.isFinite(Number(daysInput)) ? Math.max(1, Math.min(90, Number(daysInput))) : 7;
-  const tradesResp = await fetchJson(`${CPGW_BASE}/iserver/account/trades?days=${days}`);
+  const days = Number.isFinite(Number(daysInput))
+    ? Math.max(1, Math.min(3650, Number(daysInput)))
+    : YTD_DAYS;
+  state.preferences.accountId = accountId;
+  state.preferences.days = days;
+  const tradesResp = includeTrades
+    ? await fetchJson(`${CPGW_BASE}/iserver/account/trades?days=${days}`)
+    : { ok: true, status: 200, data: [], error: null };
 
   if (!summaryResp.ok) notes.push(`Summary request failed (${summaryResp.status}).`);
   if (!positionsResp.ok) notes.push(`Positions request failed (${positionsResp.status}).`);
-  if (!tradesResp.ok) notes.push(`Trades request failed (${tradesResp.status}).`);
+  if (includeTrades) {
+    if (!tradesResp.ok) notes.push(`Trades request failed (${tradesResp.status}).`);
+  } else {
+    notes.push("trades_skipped=1");
+  }
 
   const preview = {
     account_id: accountId,
@@ -286,14 +321,14 @@ async function buildPreview(accountIdInput, daysInput) {
     fetched_at: nowIso(),
     summary: normalizeSummary(summaryResp.data),
     positions: normalizePositions(positionsResp.data),
-    trades: normalizeTrades(tradesResp.data),
-    notes,
+    trades: includeTrades ? normalizeTrades(tradesResp.data) : [],
+    notes: includeTrades ? [...notes, `trades_days=${days}`] : notes,
     meta: {
       accounts,
       endpoints: {
         summary: `${CPGW_BASE}/portfolio/${accountId}/summary`,
         positions: "portfolio2/positions fallback chain",
-        trades: `${CPGW_BASE}/iserver/account/trades?days=${days}`,
+        trades: includeTrades ? `${CPGW_BASE}/iserver/account/trades?days=${days}` : "skipped",
       },
     },
   };
@@ -301,6 +336,79 @@ async function buildPreview(accountIdInput, daysInput) {
   state.preview = preview;
   pushLog(`Preview fetched: ${preview.positions.length} positions, ${preview.trades.length} trades.`);
   return preview;
+}
+
+async function syncPreview(preview, body = {}) {
+  const appSyncUrl = String(body.appSyncUrl ?? APP_SYNC_URL).trim();
+  const token = String(body.token ?? APP_SYNC_TOKEN).trim();
+  if (!appSyncUrl) {
+    throw new Error("IBKR_APP_SYNC_URL is not configured.");
+  }
+  if (!token) {
+    throw new Error("IBKR_SYNC_TOKEN is not configured.");
+  }
+
+  const resp = await fetchJson(appSyncUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-ibkr-sync-token": token,
+    },
+    body: JSON.stringify(preview),
+  });
+
+  if (!resp.ok) {
+    const message = typeof resp.data?.error === "string" ? resp.data.error : `Sync failed (${resp.status})`;
+    throw new Error(message);
+  }
+
+  state.lastSyncResponse = resp.data;
+  return resp.data;
+}
+
+async function runAutoSyncCycle(force = false) {
+  if ((!state.autoSync.enabled && !force) || state.autoSync.inFlight) return;
+  state.autoSync.inFlight = true;
+  state.autoSync.lastAttemptAt = nowIso();
+  state.autoSync.lastError = null;
+
+  try {
+    const auth = await fetchAuthStatus();
+    if (!auth.authenticated || !auth.connected) {
+      throw new Error("Session not authenticated/connected.");
+    }
+    const preview = await buildPreview(state.preferences.accountId, state.preferences.days, {
+      includeTrades: false,
+    });
+    await syncPreview(preview);
+    state.autoSync.lastSuccessAt = nowIso();
+    pushLog("Auto-sync cycle completed.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Auto-sync failed";
+    state.autoSync.lastError = message;
+    pushLog(`Auto-sync error: ${message}`);
+  } finally {
+    state.autoSync.inFlight = false;
+  }
+}
+
+function setAutoSyncEnabled(enabled) {
+  const next = Boolean(enabled);
+  state.autoSync.enabled = next;
+  if (state.autoSync.timer) {
+    clearInterval(state.autoSync.timer);
+    state.autoSync.timer = null;
+  }
+  if (!next) {
+    pushLog("Auto-sync disabled.");
+    return;
+  }
+  const intervalMs = Math.max(3, Number(state.autoSync.intervalSeconds) || 60) * 1000;
+  state.autoSync.timer = setInterval(() => {
+    void runAutoSyncCycle();
+  }, intervalMs);
+  pushLog(`Auto-sync enabled (${state.autoSync.intervalSeconds}s interval).`);
+  void runAutoSyncCycle();
 }
 
 function html() {
@@ -352,15 +460,32 @@ function html() {
       <div class="row">
         <label class="muted">Account ID</label>
         <input id="accountId" class="input mono" value="${DEFAULT_ACCOUNT_ID}" />
-        <label class="muted">Trades Days</label>
-        <input id="days" class="input mono" value="7" />
+        <label class="muted">History Days (manual)</label>
+        <input id="days" class="input mono" value="${Number.isFinite(DEFAULT_TRADES_DAYS) ? Math.max(1, Math.min(3650, DEFAULT_TRADES_DAYS)) : YTD_DAYS}" />
       </div>
       <div class="row" style="margin-top:8px;">
-        <button class="btn green" id="btnFetch">Fetch Preview</button>
+        <button class="btn green" id="btnFetch">Fetch Live Preview</button>
+        <button class="btn gray" id="btnFetchHistory">Fetch Full History</button>
         <button class="btn green" id="btnSync">Sync To DB</button>
-        <span class="muted">Fetch and sync are separated. Sync uses current preview only.</span>
+        <span class="muted">Sync uses current preview only. Auto-sync fetches summary + positions (no trades).</span>
       </div>
       <div id="previewMeta" class="muted" style="margin-top:8px;">No preview loaded.</div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <div class="mono">Auto-sync: <span id="autoSyncState">off</span></div>
+        <div class="mono">Heartbeat: <span id="autoSyncHeartbeat">—</span></div>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button class="btn" id="btnAutoToggle">Enable Auto Sync</button>
+        <button class="btn gray" id="btnAutoRun">Run Now</button>
+        <label class="muted">Interval</label>
+        <select id="autoSyncInterval" class="input mono" style="min-width:120px;">
+          ${AUTO_SYNC_CHOICES.map((value) => `<option value="${value}" ${value === RESOLVED_DEFAULT_AUTO_SYNC_SECONDS ? "selected" : ""}>${value >= 60 ? `${Math.round(value / 60)}m` : `${value}s`}</option>`).join("")}
+        </select>
+      </div>
+      <div id="autoSyncMeta" class="muted" style="margin-top:8px;">Auto-sync disabled.</div>
     </div>
 
     <div class="card">
@@ -387,7 +512,14 @@ function html() {
     const previewMeta = document.getElementById("previewMeta");
     const logOutput = document.getElementById("logOutput");
     const btnFetch = document.getElementById("btnFetch");
+    const btnFetchHistory = document.getElementById("btnFetchHistory");
     const btnSync = document.getElementById("btnSync");
+    const autoSyncState = document.getElementById("autoSyncState");
+    const autoSyncHeartbeat = document.getElementById("autoSyncHeartbeat");
+    const autoSyncMeta = document.getElementById("autoSyncMeta");
+    const autoSyncInterval = document.getElementById("autoSyncInterval");
+    const btnAutoToggle = document.getElementById("btnAutoToggle");
+    const btnAutoRun = document.getElementById("btnAutoRun");
 
     async function call(url, method = "GET", body) {
       const resp = await fetch(url, {
@@ -407,7 +539,21 @@ function html() {
       authState.textContent = ok ? "authenticated + connected" : "not ready";
       authState.className = ok ? "ok" : "bad";
       btnFetch.disabled = !ok;
+      btnFetchHistory.disabled = !ok;
       btnSync.disabled = !ok;
+      btnAutoRun.disabled = !ok;
+
+      const auto = status.auto_sync || {};
+      autoSyncState.textContent = auto.enabled ? "on" : "off";
+      autoSyncState.className = auto.enabled ? "ok" : "bad";
+      btnAutoToggle.textContent = auto.enabled ? "Disable Auto Sync" : "Enable Auto Sync";
+      autoSyncInterval.value = String(auto.intervalSeconds || autoSyncInterval.value);
+      const lastSuccess = auto.lastSuccessAt ? new Date(auto.lastSuccessAt).toLocaleTimeString() : "—";
+      autoSyncHeartbeat.textContent = auto.inFlight ? "running..." : lastSuccess;
+      autoSyncMeta.textContent =
+        auto.lastError
+          ? ("Error: " + auto.lastError)
+          : ("Account " + (auto.accountId || "—") + " · Days " + (auto.days || "—") + " · Last attempt " + (auto.lastAttemptAt ? new Date(auto.lastAttemptAt).toLocaleTimeString() : "—"));
     }
 
     async function refreshStatus() {
@@ -420,6 +566,7 @@ function html() {
         authState.textContent = String(e.message || e);
         authState.className = "bad";
         btnFetch.disabled = true;
+        btnFetchHistory.disabled = true;
         btnSync.disabled = true;
       }
       try {
@@ -444,11 +591,30 @@ function html() {
 
     document.getElementById("btnFetch").onclick = async () => {
       const accountId = document.getElementById("accountId").value.trim();
-      const days = Number(document.getElementById("days").value || "7");
       try {
-        const data = await call("/api/fetch/preview", "POST", { accountId, days });
+        const data = await call("/api/fetch/preview", "POST", {
+          accountId,
+          includeTrades: false
+        });
         previewOutput.textContent = JSON.stringify(data.preview, null, 2);
-        previewMeta.textContent = "Preview ready: " + data.preview.positions.length + " positions, " + data.preview.trades.length + " trades.";
+        previewMeta.textContent = "Live preview ready: " + data.preview.positions.length + " positions, " + data.preview.trades.length + " trades.";
+      } catch (e) {
+        alert(String(e.message || e));
+      }
+      await refreshStatus();
+    };
+
+    btnFetchHistory.onclick = async () => {
+      const accountId = document.getElementById("accountId").value.trim();
+      const days = Number(document.getElementById("days").value || "${YTD_DAYS}");
+      try {
+        const data = await call("/api/fetch/preview", "POST", {
+          accountId,
+          days,
+          includeTrades: true
+        });
+        previewOutput.textContent = JSON.stringify(data.preview, null, 2);
+        previewMeta.textContent = "History preview ready: " + data.preview.positions.length + " positions, " + data.preview.trades.length + " trades.";
       } catch (e) {
         alert(String(e.message || e));
       }
@@ -459,6 +625,46 @@ function html() {
       try {
         const data = await call("/api/sync", "POST");
         syncOutput.textContent = JSON.stringify(data, null, 2);
+      } catch (e) {
+        alert(String(e.message || e));
+      }
+      await refreshStatus();
+    };
+
+    btnAutoToggle.onclick = async () => {
+      try {
+        const enabled = autoSyncState.textContent !== "on";
+        await call("/api/auto-sync", "POST", {
+          enabled,
+          intervalSeconds: Number(autoSyncInterval.value || "60"),
+          accountId: document.getElementById("accountId").value.trim(),
+          days: Number(document.getElementById("days").value || "7")
+        });
+      } catch (e) {
+        alert(String(e.message || e));
+      }
+      await refreshStatus();
+    };
+
+    autoSyncInterval.onchange = async () => {
+      try {
+        await call("/api/auto-sync", "POST", {
+          intervalSeconds: Number(autoSyncInterval.value || "60"),
+          accountId: document.getElementById("accountId").value.trim(),
+          days: Number(document.getElementById("days").value || "7")
+        });
+      } catch (e) {
+        alert(String(e.message || e));
+      }
+      await refreshStatus();
+    };
+
+    btnAutoRun.onclick = async () => {
+      try {
+        await call("/api/auto-sync/run", "POST", {
+          accountId: document.getElementById("accountId").value.trim(),
+          days: Number(document.getElementById("days").value || "7")
+        });
       } catch (e) {
         alert(String(e.message || e));
       }
@@ -488,7 +694,19 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && url.pathname === "/api/ibkr/auth-status") {
     const status = await fetchAuthStatus();
-    sendJson(res, 200, status);
+    sendJson(res, 200, {
+      ...status,
+      auto_sync: {
+        enabled: state.autoSync.enabled,
+        intervalSeconds: state.autoSync.intervalSeconds,
+        inFlight: state.autoSync.inFlight,
+        lastAttemptAt: state.autoSync.lastAttemptAt,
+        lastSuccessAt: state.autoSync.lastSuccessAt,
+        lastError: state.autoSync.lastError,
+        accountId: state.preferences.accountId,
+        days: state.preferences.days,
+      },
+    });
     return;
   }
 
@@ -507,7 +725,9 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/fetch/preview") {
     try {
       const body = await readBody(req);
-      const preview = await buildPreview(body.accountId, body.days);
+      const preview = await buildPreview(body.accountId, body.days, {
+        includeTrades: body.includeTrades !== false,
+      });
       sendJson(res, 200, { ok: true, preview });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to fetch preview";
@@ -525,38 +745,79 @@ const server = http.createServer(async (req, res) => {
       }
 
       const body = await readBody(req);
-      const appSyncUrl = String(body.appSyncUrl ?? APP_SYNC_URL).trim();
-      const token = String(body.token ?? APP_SYNC_TOKEN).trim();
-      if (!appSyncUrl) {
-        sendJson(res, 400, { error: "IBKR_APP_SYNC_URL is not configured." });
-        return;
-      }
-      if (!token) {
-        sendJson(res, 400, { error: "IBKR_SYNC_TOKEN is not configured." });
-        return;
-      }
-
-      const resp = await fetchJson(appSyncUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-ibkr-sync-token": token,
-        },
-        body: JSON.stringify(state.preview),
-      });
-
-      if (!resp.ok) {
-        const message = typeof resp.data?.error === "string" ? resp.data.error : `Sync failed (${resp.status})`;
-        sendJson(res, 502, { error: message, upstream: resp.data });
-        return;
-      }
-
-      state.lastSyncResponse = resp.data;
+      const response = await syncPreview(state.preview, body);
       pushLog("Sync completed successfully.");
-      sendJson(res, 200, { ok: true, response: resp.data });
+      sendJson(res, 200, { ok: true, response });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Sync failed";
       pushLog(`Sync error: ${message}`);
+      sendJson(res, 500, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auto-sync") {
+    try {
+      const body = await readBody(req);
+      const nextInterval = Number(body.intervalSeconds);
+      if (Number.isFinite(nextInterval)) {
+        const rounded = Math.floor(nextInterval);
+        if (!AUTO_SYNC_CHOICES.includes(rounded)) {
+          sendJson(res, 400, { error: `intervalSeconds must be one of: ${AUTO_SYNC_CHOICES.join(", ")}` });
+          return;
+        }
+        state.autoSync.intervalSeconds = rounded;
+      }
+
+      if (typeof body.accountId === "string" && body.accountId.trim()) {
+        state.preferences.accountId = body.accountId.trim().toUpperCase();
+      }
+      const days = Number(body.days);
+      if (Number.isFinite(days)) {
+        state.preferences.days = Math.max(1, Math.min(3650, Math.floor(days)));
+      }
+
+      if (typeof body.enabled === "boolean") {
+        setAutoSyncEnabled(body.enabled);
+      } else if (state.autoSync.enabled) {
+        // Re-arm timer if interval changed while enabled.
+        setAutoSyncEnabled(true);
+      }
+
+      sendJson(res, 200, {
+        ok: true,
+        auto_sync: {
+          enabled: state.autoSync.enabled,
+          intervalSeconds: state.autoSync.intervalSeconds,
+          accountId: state.preferences.accountId,
+          days: state.preferences.days,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to update auto-sync";
+      sendJson(res, 500, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auto-sync/run") {
+    try {
+      const body = await readBody(req);
+      if (typeof body.accountId === "string" && body.accountId.trim()) {
+        state.preferences.accountId = body.accountId.trim().toUpperCase();
+      }
+      const days = Number(body.days);
+      if (Number.isFinite(days)) {
+        state.preferences.days = Math.max(1, Math.min(3650, Math.floor(days)));
+      }
+      await runAutoSyncCycle(true);
+      sendJson(res, 200, {
+        ok: true,
+        lastSuccessAt: state.autoSync.lastSuccessAt,
+        lastError: state.autoSync.lastError,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Auto-sync run failed";
       sendJson(res, 500, { error: message });
     }
     return;
@@ -581,6 +842,9 @@ function openBrowser(url) {
 server.listen(PANEL_PORT, () => {
   const url = `http://localhost:${PANEL_PORT}`;
   pushLog(`Panel listening on ${url}`);
+  if (DEFAULT_AUTO_SYNC_ENABLED) {
+    setAutoSyncEnabled(true);
+  }
   console.log(`IBKR control panel running at ${url}`);
   console.log(`Open panel: ${terminalHyperlink(url)}`);
   if (PANEL_AUTO_OPEN) {

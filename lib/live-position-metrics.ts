@@ -90,7 +90,12 @@ function parseIBSymbol(symbol: string): ParsedLegSymbol | null {
 }
 
 function strategyCredit(strategy: string): boolean {
-  return strategy === "Bull Put Spread" || strategy === "Bear Call Spread" || strategy === "Iron Condor";
+  return (
+    strategy === "Bull Put Spread" ||
+    strategy === "Bear Call Spread" ||
+    strategy === "Iron Condor" ||
+    strategy === "Iron Butterfly"
+  );
 }
 
 function inferSides(strategy: string, parsed: ParsedLegSymbol[]): Map<string, "LONG" | "SHORT"> {
@@ -128,6 +133,34 @@ function inferSides(strategy: string, parsed: ParsedLegSymbol[]): Map<string, "L
     sideBySymbol.set(puts[puts.length - 1].symbol, "SHORT");
     sideBySymbol.set(calls[0].symbol, "SHORT");
     sideBySymbol.set(calls[calls.length - 1].symbol, "LONG");
+    return sideBySymbol;
+  }
+
+  if (strategy === "Iron Butterfly" && puts.length >= 2 && calls.length >= 2) {
+    sideBySymbol.set(puts[0].symbol, "LONG");
+    sideBySymbol.set(puts[puts.length - 1].symbol, "SHORT");
+    sideBySymbol.set(calls[0].symbol, "SHORT");
+    sideBySymbol.set(calls[calls.length - 1].symbol, "LONG");
+    return sideBySymbol;
+  }
+
+  if (strategy === "Call Butterfly" && calls.length >= 3) {
+    const low = calls[0];
+    const mid = calls[Math.floor(calls.length / 2)];
+    const high = calls[calls.length - 1];
+    sideBySymbol.set(low.symbol, "LONG");
+    sideBySymbol.set(mid.symbol, "SHORT");
+    sideBySymbol.set(high.symbol, "LONG");
+    return sideBySymbol;
+  }
+
+  if (strategy === "Put Butterfly" && puts.length >= 3) {
+    const low = puts[0];
+    const mid = puts[Math.floor(puts.length / 2)];
+    const high = puts[puts.length - 1];
+    sideBySymbol.set(low.symbol, "LONG");
+    sideBySymbol.set(mid.symbol, "SHORT");
+    sideBySymbol.set(high.symbol, "LONG");
     return sideBySymbol;
   }
 

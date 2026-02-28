@@ -14,6 +14,8 @@ interface LiveTabProps {
   assetFilter: "options" | "stocks" | "all";
   initialPrices?: Record<string, number>;
   initialOptionQuotes?: OptionQuoteMap;
+  allowExternalPriceFetch?: boolean;
+  livePnlMode?: "derived" | "ibkr-native";
 }
 
 type LiveSortKey =
@@ -41,6 +43,8 @@ export function LiveTab({
   assetFilter,
   initialPrices,
   initialOptionQuotes,
+  allowExternalPriceFetch = true,
+  livePnlMode = "derived",
 }: LiveTabProps) {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [manualInputs, setManualInputs] = useState<Record<string, string>>({});
@@ -135,13 +139,17 @@ export function LiveTab({
       const price = getPrice(position.ticker);
       const risk = getRiskSnapshot(position, price);
       const live = buildLiveOptionSnapshot(position, effectiveOptionQuotes);
+      const livePnl =
+        livePnlMode === "ibkr-native"
+          ? (position.unrealized_pl ?? null)
+          : live.livePnl;
       byId.set(position.id, {
         riskLevel: risk.level,
-        livePnl: live.livePnl,
+        livePnl,
       });
     }
     return byId;
-  }, [effectiveOptionQuotes, getPrice, positions]);
+  }, [effectiveOptionQuotes, getPrice, livePnlMode, positions]);
 
   const sortedPositions = useMemo(() => {
     const list = [...positions];
@@ -174,6 +182,7 @@ export function LiveTab({
   }, [liveSnapshots, positions, sortDirection, sortKey]);
 
   async function fetchPrices() {
+    if (!allowExternalPriceFetch) return;
     setLoading(true);
     try {
       const tickers = [...new Set(positions.map((position) => position.ticker))];
@@ -225,52 +234,56 @@ export function LiveTab({
       {positions.length > 0 && (
         <div style={{ marginBottom: "12px" }}>
           <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "8px", alignItems: "center" }}>
-            <button
-              onClick={fetchPrices}
-              disabled={loading}
-              style={{
-                padding: "5px 14px",
-                borderRadius: "4px",
-                border: `1px solid ${DESIGN.blue}44`,
-                background: `${DESIGN.blue}18`,
-                color: DESIGN.blue,
-                fontSize: "11px",
-                cursor: "pointer",
-                fontWeight: 600,
-              }}
-            >
-              {loading ? "Fetching..." : "Fetch Prices"}
-            </button>
-            <button
-              onClick={() => setShowManual((value) => !value)}
-              style={{
-                padding: "5px 14px",
-                borderRadius: "4px",
-                border: `1px solid ${DESIGN.purple}44`,
-                background: showManual ? `${DESIGN.purple}18` : "transparent",
-                color: DESIGN.purple,
-                fontSize: "11px",
-                cursor: "pointer",
-                fontWeight: 600,
-              }}
-            >
-              Manual
-            </button>
-            <button
-              onClick={() => setShowManualLegMarks((value) => !value)}
-              style={{
-                padding: "5px 14px",
-                borderRadius: "4px",
-                border: `1px solid ${DESIGN.cardBorder}`,
-                background: showManualLegMarks ? `${DESIGN.blue}14` : "transparent",
-                color: showManualLegMarks ? DESIGN.blue : DESIGN.muted,
-                fontSize: "11px",
-                cursor: "pointer",
-                fontWeight: 600,
-              }}
-            >
-              Leg Marks
-            </button>
+            {allowExternalPriceFetch && (
+              <>
+                <button
+                  onClick={fetchPrices}
+                  disabled={loading}
+                  style={{
+                    padding: "5px 14px",
+                    borderRadius: "4px",
+                    border: `1px solid ${DESIGN.blue}44`,
+                    background: `${DESIGN.blue}18`,
+                    color: DESIGN.blue,
+                    fontSize: "11px",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  {loading ? "Fetching..." : "Fetch Prices"}
+                </button>
+                <button
+                  onClick={() => setShowManual((value) => !value)}
+                  style={{
+                    padding: "5px 14px",
+                    borderRadius: "4px",
+                    border: `1px solid ${DESIGN.purple}44`,
+                    background: showManual ? `${DESIGN.purple}18` : "transparent",
+                    color: DESIGN.purple,
+                    fontSize: "11px",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  Manual
+                </button>
+                <button
+                  onClick={() => setShowManualLegMarks((value) => !value)}
+                  style={{
+                    padding: "5px 14px",
+                    borderRadius: "4px",
+                    border: `1px solid ${DESIGN.cardBorder}`,
+                    background: showManualLegMarks ? `${DESIGN.blue}14` : "transparent",
+                    color: showManualLegMarks ? DESIGN.blue : DESIGN.muted,
+                    fontSize: "11px",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  Leg Marks
+                </button>
+              </>
+            )}
             <select
               value={sortKey}
               onChange={(event) => setSortKey(event.target.value as LiveSortKey)}
@@ -312,6 +325,11 @@ export function LiveTab({
             <span style={{ fontSize: "10px", color: DESIGN.muted, alignSelf: "center" }}>
               Sort is remembered
             </span>
+            {!allowExternalPriceFetch && (
+              <span style={{ fontSize: "10px", color: DESIGN.blue, alignSelf: "center" }}>
+                IBKR-only mode: prices/marks refresh via local sync panel
+              </span>
+            )}
             {lastFetch && (
               <span style={{ fontSize: "10px", color: DESIGN.muted, alignSelf: "center" }}>
                 Updated {new Date(lastFetch).toLocaleTimeString()}
@@ -319,7 +337,7 @@ export function LiveTab({
             )}
           </div>
 
-          {showManual && (
+          {allowExternalPriceFetch && showManual && (
             <div
               style={{
                 display: "grid",
@@ -369,7 +387,7 @@ export function LiveTab({
             </div>
           )}
 
-          {showManualLegMarks && (
+          {allowExternalPriceFetch && showManualLegMarks && (
             <div style={{ marginTop: "8px" }}>
               <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase", fontWeight: 700, marginBottom: "6px" }}>
                 Manual Option Leg Marks (for live P/L)
@@ -436,6 +454,8 @@ export function LiveTab({
           position={position}
           price={getPrice(position.ticker)}
           optionQuotes={effectiveOptionQuotes}
+          livePnlOverride={liveSnapshots.get(position.id)?.livePnl ?? null}
+          livePnlMode={livePnlMode}
           expanded={expandedId === position.id}
           onToggle={() => setExpandedId((current) => (current === position.id ? null : position.id))}
         />

@@ -81,12 +81,16 @@ export function PositionCard({
   position,
   price,
   optionQuotes,
+  livePnlOverride,
+  livePnlMode = "derived",
   expanded,
   onToggle,
 }: {
   position: Trade;
   price: number | null;
   optionQuotes: OptionQuoteMap;
+  livePnlOverride?: number | null;
+  livePnlMode?: "derived" | "ibkr-native";
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -99,12 +103,17 @@ export function PositionCard({
   const guidanceTone = toneByLevel(guidance.level);
   const entryPerContract =
     position.contracts > 0 ? position.cost_basis / (position.contracts * 100) : null;
+  const displayLivePnl = livePnlOverride ?? null;
+  const capturePct =
+    displayLivePnl != null && displayLivePnl > 0 && position.max_profit != null && position.max_profit > 0
+      ? Number(((displayLivePnl / position.max_profit) * 100).toFixed(1))
+      : live.profitCapturePct;
   const profitCaptureColor =
-    live.profitCapturePct == null
+    capturePct == null
       ? DESIGN.muted
-      : live.profitCapturePct >= 40 && live.profitCapturePct <= 70
+      : capturePct >= 40 && capturePct <= 70
         ? DESIGN.green
-        : live.profitCapturePct > 70
+        : capturePct > 70
           ? DESIGN.yellow
           : DESIGN.blue;
   const legSources = Array.from(
@@ -116,7 +125,6 @@ export function PositionCard({
       : legSources.length === 1
         ? sourceLabel(legSources[0])
         : `mixed (${legSources.map((value) => sourceLabel(value)).join(" / ")})`;
-
   return (
     <div
       onClick={onToggle}
@@ -162,20 +170,24 @@ export function PositionCard({
           <span style={{ color: risk.color, fontWeight: 600 }} title={risk.detail}>
             {risk.label}
           </span>
-          {live.livePnl != null && (
+          {displayLivePnl != null && (
             <span
-              style={{ color: live.livePnl >= 0 ? DESIGN.green : DESIGN.red, fontWeight: 700 }}
-              title="Live option P/L from option mark quotes"
+              style={{ color: displayLivePnl >= 0 ? DESIGN.green : DESIGN.red, fontWeight: 700 }}
+              title={
+                livePnlMode === "ibkr-native"
+                  ? "IBKR native unrealized P/L from synced positions"
+                  : "Live option P/L from option mark quotes"
+              }
             >
-              {formatSigned(live.livePnl)}
+              {formatSigned(displayLivePnl)}
             </span>
           )}
-          {live.livePnl == null && live.markValue != null && (
+          {displayLivePnl == null && live.markValue != null && (
             <span style={{ color: DESIGN.blue, fontWeight: 700 }} title="Live option position mark value">
               Mark {formatMoney(live.markValue)}
             </span>
           )}
-          {live.livePnl == null && live.markValue == null && (
+          {displayLivePnl == null && live.markValue == null && (
             <span style={{ color: DESIGN.muted, fontWeight: 700 }} title="Needs option quote data for all legs">
               Live P/L —
             </span>
@@ -212,11 +224,11 @@ export function PositionCard({
         {position.theta_per_day != null && (
           <span>Theta/day: {position.theta_per_day}</span>
         )}
-        {live.profitCapturePct != null && (
+        {capturePct != null && (
           <span title="Current live P/L as % of max profit target">
             Capture:{" "}
             <span style={{ color: profitCaptureColor, fontFamily: DESIGN.mono, fontWeight: 700 }}>
-              {live.profitCapturePct.toFixed(1)}%
+              {capturePct.toFixed(1)}%
             </span>
           </span>
         )}

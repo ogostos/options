@@ -35,12 +35,7 @@ export interface IbkrLiveModel {
     matchedTrades: number;
     derivedTrades: number;
     unmatchedLegs: number;
-    baselineOpenTrades: number;
   };
-}
-
-interface BuildIbkrLiveModelOptions {
-  baselineOpenTrades?: Trade[];
 }
 
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
@@ -342,7 +337,7 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
         ? shortStrike - (maxProfit / (100 * maxAbsQty))
         : shortStrike + (maxProfit / (100 * maxAbsQty));
     }
-  } else if (strategy === "Iron Condor" && puts.length >= 2 && calls.length >= 2) {
+  } else if ((strategy === "Iron Condor" || strategy === "Iron Butterfly") && puts.length >= 2 && calls.length >= 2) {
     const putWidth = Math.abs(puts[puts.length - 1].strike - puts[0].strike) * 100 * maxAbsQty;
     const callWidth = Math.abs(calls[calls.length - 1].strike - calls[0].strike) * 100 * maxAbsQty;
     const width = Math.min(putWidth, callWidth);
@@ -351,6 +346,27 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
     const shortPut = puts[puts.length - 1]?.strike;
     if (shortPut != null && maxProfit != null) {
       breakeven = shortPut - maxProfit / (100 * maxAbsQty);
+    }
+  } else if ((strategy === "Call Butterfly" || strategy === "Put Butterfly") && legs.length >= 3) {
+    const sameTypeLegs = strategy === "Call Butterfly" ? calls : puts;
+    if (sameTypeLegs.length >= 3) {
+      const lower = sameTypeLegs[0].strike;
+      const body = sameTypeLegs[Math.floor(sameTypeLegs.length / 2)].strike;
+      const upper = sameTypeLegs[sameTypeLegs.length - 1].strike;
+      const widthLower = (body - lower) * 100 * maxAbsQty;
+      const widthUpper = (upper - body) * 100 * maxAbsQty;
+      const width = Math.min(widthLower, widthUpper);
+      if (width > 0) {
+        if (debit > 0) {
+          maxRisk = debit;
+          maxProfit = Math.max(width - debit, 0);
+          breakeven = lower + debit / (100 * maxAbsQty);
+        } else {
+          maxProfit = credit > 0 ? credit : null;
+          maxRisk = Math.max(width - credit, 0);
+          breakeven = lower + (maxProfit ?? 0) / (100 * maxAbsQty);
+        }
+      }
     }
   } else {
     maxRisk = Math.max(debit, credit, 0);
@@ -391,7 +407,14 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
     expiry_date: first.expiryDate,
     status: "OPEN",
     position_type: "option",
-    cost_basis: round2(strategy === "Bull Put Spread" || strategy === "Bear Call Spread" || strategy === "Iron Condor" ? credit : maxRisk),
+    cost_basis: round2(
+      strategy === "Bull Put Spread" ||
+      strategy === "Bear Call Spread" ||
+      strategy === "Iron Condor" ||
+      strategy === "Iron Butterfly"
+        ? credit
+        : maxRisk,
+    ),
     max_risk: round2(Math.max(maxRisk, 0)),
     max_profit: maxProfit == null ? null : round2(Math.max(maxProfit, 0)),
     realized_pl: realized,
@@ -404,8 +427,8 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
     lesson: "",
     breakeven: breakeven == null ? null : Number(breakeven.toFixed(4)),
     stop_loss: null,
-    strike_long: strategy === "Iron Condor" ? null : longStrikes[0] ?? null,
-    strike_short: strategy === "Iron Condor" ? null : shortStrikes[shortStrikes.length - 1] ?? null,
+    strike_long: strategy === "Iron Condor" || strategy === "Iron Butterfly" ? null : longStrikes[0] ?? null,
+    strike_short: strategy === "Iron Condor" || strategy === "Iron Butterfly" ? null : shortStrikes[shortStrikes.length - 1] ?? null,
     close_price_long: closeLong == null ? null : Number(closeLong.toFixed(4)),
     close_price_short: closeShort == null ? null : Number(closeShort.toFixed(4)),
     theta_per_day: null,
@@ -422,38 +445,120 @@ function buildTradeFromLegGroup(snapshot: IbkrSyncSnapshot, legs: ParsedOptionLe
   };
 }
 
-function buildTradeFromBaseline(snapshot: IbkrSyncSnapshot, baseline: Trade, legs: ParsedOptionLeg[]): Trade {
-  const contractsFromLegs = Math.max(...legs.map((leg) => Math.abs(leg.quantity)), baseline.contracts, 1);
-  const unrealized = round2(legs.reduce((sum, leg) => sum + (leg.unrealized ?? 0), 0));
-  const realized = round2(legs.reduce((sum, leg) => sum + (leg.realized ?? 0), 0));
-  return {
-    ...baseline,
-    updated_at: snapshot.created_at,
-    status: "OPEN",
-    contracts: contractsFromLegs,
-    expiry_date: legs[0]?.expiryDate ?? baseline.expiry_date,
-    unrealized_pl: Number.isFinite(unrealized) ? unrealized : baseline.unrealized_pl,
-    realized_pl: baseline.realized_pl ?? realized,
-    ib_symbols: sortUniqueSymbols(baseline.ib_symbols ?? []),
-  };
+function parseTradeTimestamp(value: string | null): number {
+  if (!value) return 0;
+  const match = value.match(/^(\d{4})(\d{2})(\d{2})-(\d{2}):(\d{2}):(\d{2})$/);
+  if (!match) return 0;
+  const [, yyyy, mm, dd, hh, min, ss] = match;
+  const ts = Date.parse(`${yyyy}-${mm}-${dd}T${hh}:${min}:${ss}Z`);
+  return Number.isFinite(ts) ? ts : 0;
 }
 
-function groupUnmatchedLegs(legs: ParsedOptionLeg[]) {
-  const grouped = new Map<string, ParsedOptionLeg[]>();
-  for (const leg of legs) {
-    const key = `${leg.ticker}|${leg.expiryDate}`;
-    const bucket = grouped.get(key) ?? [];
-    bucket.push(leg);
-    grouped.set(key, bucket);
+function extractOrderGroupKey(trade: IbkrTradeRecord): string | null {
+  const raw = trade.raw ?? {};
+  const orderRef = typeof raw.order_ref === "string" ? raw.order_ref.trim() : "";
+  if (orderRef) return `ref:${orderRef}`;
+  const orderId = raw.order_id ?? raw.orderId;
+  if (orderId != null && String(orderId).trim()) return `oid:${String(orderId).trim()}`;
+  return null;
+}
+
+function sortLegs(legs: ParsedOptionLeg[]): ParsedOptionLeg[] {
+  return [...legs].sort((a, b) => {
+    if (a.ticker !== b.ticker) return a.ticker.localeCompare(b.ticker);
+    if (a.expiryDate !== b.expiryDate) return a.expiryDate.localeCompare(b.expiryDate);
+    if (a.optionType !== b.optionType) return a.optionType.localeCompare(b.optionType);
+    return a.strike - b.strike;
+  });
+}
+
+function groupUnmatchedLegs(legs: ParsedOptionLeg[], trades: IbkrTradeRecord[]): ParsedOptionLeg[][] {
+  if (legs.length === 0) return [];
+  const groups: ParsedOptionLeg[][] = [];
+  const assignedSymbols = new Set<string>();
+
+  const tradeHints = new Map<
+    string,
+    {
+      ticker: string | null;
+      conids: Set<number>;
+      latestTs: number;
+    }
+  >();
+
+  for (const trade of trades) {
+    const conid = trade.conid;
+    if (conid == null) continue;
+    const key = extractOrderGroupKey(trade);
+    if (!key) continue;
+    const current = tradeHints.get(key) ?? {
+      ticker: trade.symbol ? trade.symbol.toUpperCase() : null,
+      conids: new Set<number>(),
+      latestTs: 0,
+    };
+    current.conids.add(conid);
+    current.latestTs = Math.max(current.latestTs, parseTradeTimestamp(trade.trade_time));
+    if (!current.ticker && trade.symbol) current.ticker = trade.symbol.toUpperCase();
+    tradeHints.set(key, current);
   }
-  return grouped;
+
+  const sortedHints = [...tradeHints.entries()].sort((a, b) => {
+    const aSize = a[1].conids.size;
+    const bSize = b[1].conids.size;
+    if (aSize !== bSize) return bSize - aSize;
+    return b[1].latestTs - a[1].latestTs;
+  });
+
+  for (const [, hint] of sortedHints) {
+    const candidates = legs.filter((leg) => {
+      if (assignedSymbols.has(leg.ibSymbol)) return false;
+      if (leg.conid == null) return false;
+      return hint.conids.has(leg.conid);
+    });
+    if (candidates.length < 2) continue;
+    const tickers = new Set(candidates.map((leg) => leg.ticker));
+    if (tickers.size !== 1) continue;
+    groups.push(sortLegs(candidates));
+    for (const leg of candidates) assignedSymbols.add(leg.ibSymbol);
+  }
+
+  const leftovers = legs.filter((leg) => !assignedSymbols.has(leg.ibSymbol));
+  const byTicker = new Map<string, ParsedOptionLeg[]>();
+  for (const leg of leftovers) {
+    const bucket = byTicker.get(leg.ticker) ?? [];
+    bucket.push(leg);
+    byTicker.set(leg.ticker, bucket);
+  }
+
+  for (const tickerLegs of byTicker.values()) {
+    const sortedTickerLegs = sortLegs(tickerLegs);
+    if (sortedTickerLegs.length === 2) {
+      const [a, b] = sortedTickerLegs;
+      const isDiagonalPair =
+        a.optionType === b.optionType &&
+        a.expiryDate !== b.expiryDate &&
+        a.quantity * b.quantity < 0;
+      if (isDiagonalPair) {
+        groups.push(sortedTickerLegs);
+        continue;
+      }
+    }
+
+    const byExpiry = new Map<string, ParsedOptionLeg[]>();
+    for (const leg of sortedTickerLegs) {
+      const bucket = byExpiry.get(leg.expiryDate) ?? [];
+      bucket.push(leg);
+      byExpiry.set(leg.expiryDate, bucket);
+    }
+    for (const expiryLegs of byExpiry.values()) {
+      groups.push(sortLegs(expiryLegs));
+    }
+  }
+
+  return groups;
 }
 
-export function buildIbkrLiveModel(
-  snapshot: IbkrSyncSnapshot,
-  options?: BuildIbkrLiveModelOptions,
-): IbkrLiveModel {
-  const baselineOpenTrades = options?.baselineOpenTrades ?? [];
+export function buildIbkrLiveModel(snapshot: IbkrSyncSnapshot): IbkrLiveModel {
   const parsedOptionLegs: ParsedOptionLeg[] = [];
   const stocks: StockPosition[] = [];
   const optionQuotes: OptionQuoteMap = {};
@@ -499,33 +604,14 @@ export function buildIbkrLiveModel(
     }
   }
 
-  const legBySymbol = new Map<string, ParsedOptionLeg>();
-  for (const leg of parsedOptionLegs) {
-    legBySymbol.set(leg.ibSymbol, leg);
-  }
-
-  const consumedSymbols = new Set<string>();
-  const matchedPositions: Trade[] = [];
-  for (const baseline of baselineOpenTrades) {
-    const required = sortUniqueSymbols(baseline.ib_symbols ?? []);
-    if (required.length === 0) continue;
-    if (required.some((symbol) => consumedSymbols.has(symbol))) continue;
-    const legs = required
-      .map((symbol) => legBySymbol.get(symbol))
-      .filter((value): value is ParsedOptionLeg => Boolean(value));
-    if (legs.length !== required.length) continue;
-    for (const symbol of required) consumedSymbols.add(symbol);
-    matchedPositions.push(buildTradeFromBaseline(snapshot, baseline, legs));
-  }
-
-  const unmatchedLegs = parsedOptionLegs.filter((leg) => !consumedSymbols.has(leg.ibSymbol));
-  const unmatchedGroups = groupUnmatchedLegs(unmatchedLegs);
+  const unmatchedLegs = parsedOptionLegs;
+  const unmatchedGroups = groupUnmatchedLegs(unmatchedLegs, snapshot.trades);
   let derivedId = -1;
-  const derivedPositions = [...unmatchedGroups.values()].map((legs) =>
+  const derivedPositions = unmatchedGroups.map((legs) =>
     buildTradeFromLegGroup(snapshot, legs, derivedId--),
   );
 
-  const openPositions = [...matchedPositions, ...derivedPositions].sort((a, b) =>
+  const openPositions = [...derivedPositions].sort((a, b) =>
     a.ticker.localeCompare(b.ticker),
   );
 
@@ -549,10 +635,9 @@ export function buildIbkrLiveModel(
     underlyingPrices,
     recentTrades: snapshot.trades,
     meta: {
-      matchedTrades: matchedPositions.length,
+      matchedTrades: 0,
       derivedTrades: derivedPositions.length,
       unmatchedLegs: unmatchedLegs.length,
-      baselineOpenTrades: baselineOpenTrades.length,
     },
   };
 }
