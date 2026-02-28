@@ -291,8 +291,26 @@ function normalizeSummary(data) {
   if (data && typeof data === "object") {
     const out = {};
     for (const [k, v] of Object.entries(data)) {
-      if (v && typeof v === "object" && "value" in v) {
-        out[k] = v.value;
+      if (v && typeof v === "object") {
+        const hasValueField = Object.prototype.hasOwnProperty.call(v, "value");
+        const value = hasValueField ? v.value : null;
+        const amount = Object.prototype.hasOwnProperty.call(v, "amount") ? v.amount : null;
+        const valueNum = toNum(value);
+        const amountNum = toNum(amount);
+        const hasMeaningfulValue =
+          value != null &&
+          String(value).trim() !== "" &&
+          String(value).trim().toLowerCase() !== "null";
+
+        if (valueNum != null) {
+          out[k] = valueNum;
+        } else if (hasMeaningfulValue) {
+          out[k] = value;
+        } else if (amountNum != null) {
+          out[k] = amountNum;
+        } else {
+          out[k] = v;
+        }
       } else {
         out[k] = v;
       }

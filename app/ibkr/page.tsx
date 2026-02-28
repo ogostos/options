@@ -25,6 +25,12 @@ const REFRESH_OPTIONS = [
   { value: 3600, label: "1h" },
 ];
 
+function formatPct(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const pct = value <= 1 ? value * 100 : value;
+  return `${pct.toFixed(1)}%`;
+}
+
 export default function IbkrPage() {
   const [snapshot, setSnapshot] = useState<IbkrSyncSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -184,7 +190,9 @@ export default function IbkrPage() {
               <div style={{ marginTop: "2px", fontSize: "11px", color: DESIGN.muted, fontFamily: DESIGN.mono }}>
                 NetLiq {model.accountSummary.netLiq != null ? formatMoney(model.accountSummary.netLiq) : "—"} ·
                 Cash {model.accountSummary.cash != null ? formatMoney(model.accountSummary.cash) : "—"} ·
-                BuyingPower {model.accountSummary.buyingPower != null ? formatMoney(model.accountSummary.buyingPower) : "—"}
+                BuyingPower {model.accountSummary.buyingPower != null ? formatMoney(model.accountSummary.buyingPower) : "—"} ·
+                AvFunds {model.accountSummary.availableFunds != null ? formatMoney(model.accountSummary.availableFunds) : "—"} ·
+                Cushion {formatPct(model.accountSummary.cushion)}
               </div>
             )}
             {lastLoadedAt && (
@@ -253,6 +261,36 @@ export default function IbkrPage() {
                   <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Excess Liquidity</div>
                   <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
                     {model.accountSummary.excessLiquidity != null ? formatMoney(model.accountSummary.excessLiquidity) : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Available Funds</div>
+                  <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                    {model.accountSummary.availableFunds != null ? formatMoney(model.accountSummary.availableFunds) : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Init Margin Req</div>
+                  <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                    {model.accountSummary.initMarginReq != null ? formatMoney(model.accountSummary.initMarginReq) : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Gross Position</div>
+                  <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                    {model.accountSummary.grossPositionValue != null ? formatMoney(model.accountSummary.grossPositionValue) : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Leverage</div>
+                  <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                    {model.accountSummary.leverage != null ? `${model.accountSummary.leverage.toFixed(2)}x` : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "10px", color: DESIGN.muted, textTransform: "uppercase" }}>Cushion</div>
+                  <div style={{ fontSize: "15px", fontFamily: DESIGN.mono, color: DESIGN.bright }}>
+                    {formatPct(model.accountSummary.cushion)}
                   </div>
                 </div>
               </div>

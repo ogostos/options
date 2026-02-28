@@ -22,8 +22,13 @@ export interface IbkrLiveModel {
     netLiq: number | null;
     cash: number | null;
     buyingPower: number | null;
+    availableFunds: number | null;
     maintenanceMargin: number | null;
+    initMarginReq: number | null;
     excessLiquidity: number | null;
+    grossPositionValue: number | null;
+    leverage: number | null;
+    cushion: number | null;
     marginDebt: number | null;
   };
   openPositions: Trade[];
@@ -670,16 +675,41 @@ export function buildIbkrLiveModel(snapshot: IbkrSyncSnapshot): IbkrLiveModel {
     "maintMarginReq",
     "fullMaintMarginReq",
   ]);
+  const initMarginReq = pickSummaryByRoots(summary, lookup, [
+    "initMarginReq",
+    "fullInitMarginReq",
+    "lookaheadInitMarginReq",
+  ]);
+  const availableFunds = pickSummaryByRoots(summary, lookup, [
+    "availableFunds",
+    "fullAvailableFunds",
+    "lookaheadAvailableFunds",
+  ]);
   const excessLiquidity = pickSummaryByRoots(summary, lookup, [
     "excessLiquidity",
     "fullExcessLiquidity",
+    "lookaheadExcessLiquidity",
+  ]);
+  const grossPositionValue = pickSummaryByRoots(summary, lookup, [
+    "grossPositionValue",
+  ]);
+  const leverage = pickSummaryByRoots(summary, lookup, [
+    "leverage",
+  ]);
+  const cushion = pickSummaryByRoots(summary, lookup, [
+    "cushion",
   ]);
   const accountSummary = {
     netLiq,
     cash,
     buyingPower,
+    availableFunds,
     maintenanceMargin,
+    initMarginReq,
     excessLiquidity,
+    grossPositionValue,
+    leverage,
+    cushion,
     marginDebt: cash == null ? null : cash < 0 ? Math.abs(cash) : 0,
   };
 
