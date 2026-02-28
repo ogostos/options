@@ -50,6 +50,7 @@ const state = {
     lastError: null,
   },
 };
+let panelShuttingDown = false;
 
 function nowIso() {
   return new Date().toISOString();
@@ -254,6 +255,40 @@ function stopGateway() {
   }
   state.gatewayProcess.kill("SIGTERM");
   return { ok: true, message: "Gateway stop signal sent." };
+}
+
+function shutdownPanelProcess() {
+  if (panelShuttingDown) return;
+  panelShuttingDown = true;
+
+  if (state.autoSync.timer) {
+    clearInterval(state.autoSync.timer);
+    state.autoSync.timer = null;
+  }
+  state.autoSync.enabled = false;
+
+  if (gatewayRunning()) {
+    state.gatewayProcess.kill("SIGTERM");
+    setTimeout(() => {
+      if (gatewayRunning()) {
+        pushLog("CPGW did not exit on SIGTERM; sending SIGKILL.");
+        try {
+          state.gatewayProcess.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }
+    }, 1200);
+  }
+
+  const forceExit = setTimeout(() => {
+    process.exit(0);
+  }, 2500);
+
+  server.close(() => {
+    clearTimeout(forceExit);
+    process.exit(0);
+  });
 }
 
 async function fetchAuthStatus() {
@@ -583,8 +618,21 @@ function html() {
     };
 
     document.getElementById("btnStop").onclick = async () => {
-      try { await call("/api/gateway/stop", "POST"); } catch (e) { alert(String(e.message || e)); }
-      await refreshStatus();
+      try {
+        await call("/api/gateway/stop", "POST");
+        gatewayState.textContent = "stopping";
+        gatewayState.className = "bad";
+        authState.textContent = "panel shutting down";
+        authState.className = "bad";
+        btnFetch.disabled = true;
+        btnFetchHistory.disabled = true;
+        btnSync.disabled = true;
+        btnAutoRun.disabled = true;
+        btnAutoToggle.disabled = true;
+        autoSyncMeta.textContent = "Stopping panel and CPGW...";
+      } catch (e) {
+        alert(String(e.message || e));
+      }
     };
 
     document.getElementById("btnCheck").onclick = refreshStatus;
@@ -718,7 +766,10 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && url.pathname === "/api/gateway/stop") {
     const result = stopGateway();
-    sendJson(res, 200, result);
+    sendJson(res, 200, { ...result, panel_shutting_down: true });
+    setTimeout(() => {
+      shutdownPanelProcess();
+    }, 150);
     return;
   }
 
