@@ -82,6 +82,24 @@ function pickSummary(summary: Record<string, unknown>, lookup: Map<string, numbe
   return null;
 }
 
+function pickSummaryByRoots(
+  summary: Record<string, unknown>,
+  lookup: Map<string, number>,
+  roots: string[],
+): number | null {
+  const direct = pickSummary(summary, lookup, roots);
+  if (direct != null) return direct;
+
+  for (const root of roots.map((item) => normalizeSummaryKey(item))) {
+    // IBKR often publishes segment variants such as -s / -c alongside base keys.
+    const suffixPattern = new RegExp(`^${root}(?:s|c|usd|base)?$`);
+    for (const [key, value] of lookup.entries()) {
+      if (suffixPattern.test(key)) return value;
+    }
+  }
+  return null;
+}
+
 function pickUnderlyingPriceMap(summary: Record<string, unknown>): Record<string, number> {
   const raw = summary.__underlying_prices;
   if (!raw || typeof raw !== "object") return {};
@@ -631,14 +649,38 @@ export function buildIbkrLiveModel(snapshot: IbkrSyncSnapshot): IbkrLiveModel {
 
   const summary = snapshot.summary ?? {};
   const lookup = buildSummaryLookup(summary);
-  const cash = pickSummary(summary, lookup, ["totalCashValue", "TotalCashValue", "cash", "cashBalance"]);
+  const netLiq = pickSummaryByRoots(summary, lookup, [
+    "netLiquidation",
+    "netliquidation",
+    "netliquidationvalue",
+    "equityWithLoanValue",
+  ]);
+  const cash = pickSummaryByRoots(summary, lookup, [
+    "totalCashValue",
+    "cashBalance",
+    "cash",
+    "settledCashByDate",
+  ]);
+  const buyingPower = pickSummaryByRoots(summary, lookup, [
+    "buyingPower",
+    "availableFunds",
+    "fullAvailableFunds",
+  ]);
+  const maintenanceMargin = pickSummaryByRoots(summary, lookup, [
+    "maintMarginReq",
+    "fullMaintMarginReq",
+  ]);
+  const excessLiquidity = pickSummaryByRoots(summary, lookup, [
+    "excessLiquidity",
+    "fullExcessLiquidity",
+  ]);
   const accountSummary = {
-    netLiq: pickSummary(summary, lookup, ["netLiquidation", "NetLiquidation", "net_liquidation"]),
+    netLiq,
     cash,
-    buyingPower: pickSummary(summary, lookup, ["buyingPower", "BuyingPower"]),
-    maintenanceMargin: pickSummary(summary, lookup, ["maintMarginReq", "MaintMarginReq", "maintenanceMargin"]),
-    excessLiquidity: pickSummary(summary, lookup, ["excessLiquidity", "ExcessLiquidity"]),
-    marginDebt: cash != null && cash < 0 ? Math.abs(cash) : 0,
+    buyingPower,
+    maintenanceMargin,
+    excessLiquidity,
+    marginDebt: cash == null ? null : cash < 0 ? Math.abs(cash) : 0,
   };
 
   const summaryUnderlyings = pickUnderlyingPriceMap(summary);

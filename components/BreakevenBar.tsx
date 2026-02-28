@@ -1,5 +1,9 @@
 import { DESIGN } from "@/lib/design";
-import { estimateIronCondorPnLAtExpiry, getIronCondorZone } from "@/lib/options-zones";
+import {
+  classifyIronCondorPriceZone,
+  estimateIronCondorPnLAtExpiry,
+  getIronCondorZone,
+} from "@/lib/options-zones";
 
 interface BreakevenBarProps {
   price: number | null;
@@ -28,12 +32,27 @@ type MarkerRender = Marker & {
   textDx: number;
 };
 
+type ZoneSegment = {
+  from: number;
+  to: number;
+  color: string;
+};
+
 type PayoffModel = {
   rangeMin: number;
   rangeMax: number;
   markers: Marker[];
+  segments: ZoneSegment[];
   summary: string[];
   pnlAtPrice: (spot: number) => number;
+  colorAtPrice: (spot: number) => string;
+};
+
+const ZONE = {
+  maxLoss: "rgba(248,113,113,0.26)",
+  recover: "rgba(251,191,36,0.24)",
+  profit: "rgba(74,222,128,0.22)",
+  maxProfit: "rgba(74,222,128,0.36)",
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -44,7 +63,7 @@ function formatPrice(value: number) {
   return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2);
 }
 
-function withMarkerLayout(markers: Array<Marker & { x: number }>, width: number, padX: number, height: number, padY: number): MarkerRender[] {
+function withMarkerLayout(markers: Array<Marker & { x: number }>, width: number, padX: number): MarkerRender[] {
   const sorted = [...markers].sort((a, b) => a.x - b.x);
   let lastTopX = Number.NEGATIVE_INFINITY;
   let topLane = 0;
@@ -52,22 +71,22 @@ function withMarkerLayout(markers: Array<Marker & { x: number }>, width: number,
   let bottomLane = 0;
 
   return sorted.map((marker) => {
-    if (marker.x - lastTopX < 30) {
+    if (marker.x - lastTopX < 28) {
       topLane = topLane === 0 ? 1 : 0;
     } else {
       topLane = 0;
     }
     lastTopX = marker.x;
 
-    if (marker.x - lastBottomX < 38) {
+    if (marker.x - lastBottomX < 34) {
       bottomLane = bottomLane === 0 ? 1 : 0;
     } else {
       bottomLane = 0;
     }
     lastBottomX = marker.x;
 
-    const labelY = topLane === 0 ? padY + 7 : padY + 14;
-    const valueY = bottomLane === 0 ? height - 3 : height - 10;
+    const labelY = topLane === 0 ? 8 : 14;
+    const valueY = bottomLane === 0 ? 70 : 64;
 
     let textAnchor: "start" | "middle" | "end" = "middle";
     let textDx = 0;
@@ -87,6 +106,11 @@ function withMarkerLayout(markers: Array<Marker & { x: number }>, width: number,
       textDx,
     };
   });
+}
+
+function safeSegment(from: number, to: number, color: string): ZoneSegment | null {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
+  return { from, to, color };
 }
 
 function buildPayoffModel({
@@ -110,9 +134,9 @@ function buildPayoffModel({
   });
 
   if (condor) {
-    const spreadPadding = condor.width * 0.9;
-    const rangeMin = condor.lowerWing - spreadPadding;
-    const rangeMax = condor.upperWing + spreadPadding;
+    const padding = condor.width * 0.9;
+    const rangeMin = condor.lowerWing - padding;
+    const rangeMax = condor.upperWing + padding;
     const markers: Marker[] = [
       { value: condor.lowerWing, label: "LW", color: DESIGN.muted },
       { value: condor.lowerBreakeven, label: "BE-L", color: DESIGN.yellow },
@@ -125,29 +149,60 @@ function buildPayoffModel({
       markers.push({ value: stopLoss, label: "STOP", color: DESIGN.red });
     }
 
+    const segments = [
+      safeSegment(rangeMin, condor.lowerWing, ZONE.maxLoss),
+      safeSegment(condor.lowerWing, condor.lowerBreakeven, ZONE.recover),
+      safeSegment(condor.lowerBreakeven, condor.lowerShort, ZONE.profit),
+      safeSegment(condor.lowerShort, condor.upperShort, ZONE.maxProfit),
+      safeSegment(condor.upperShort, condor.upperBreakeven, ZONE.profit),
+      safeSegment(condor.upperBreakeven, condor.upperWing, ZONE.recover),
+      safeSegment(condor.upperWing, rangeMax, ZONE.maxLoss),
+    ].filter((segment): segment is ZoneSegment => Boolean(segment));
+
     return {
       rangeMin,
       rangeMax,
       markers,
+      segments,
       summary: [
         `BE range $${condor.lowerBreakeven.toFixed(2)} - $${condor.upperBreakeven.toFixed(2)}`,
         `Max-profit core $${condor.lowerShort.toFixed(0)} - $${condor.upperShort.toFixed(0)}`,
       ],
       pnlAtPrice: (spot) => estimateIronCondorPnLAtExpiry(spot, condor, size),
+      colorAtPrice: (spot) => {
+        const zone = classifyIronCondorPriceZone(spot, condor);
+        if (zone === "max_loss_low" || zone === "max_loss_high") return DESIGN.red;
+        if (zone === "recover_low" || zone === "recover_high") return DESIGN.yellow;
+        return DESIGN.green;
+      },
     };
   }
 
   if (strikeLong == null || breakeven == null) return null;
 
-  const lowerStrike = strikeShort == null ? strikeLong : Math.min(strikeLong, strikeShort);
-  const upperStrike = strikeShort == null ? strikeLong : Math.max(strikeLong, strikeShort);
-  const spreadWidth = Math.max(upperStrike - lowerStrike, 0.0001);
   const isBullish =
     strategy.includes("Call") ||
     strategy.includes("Bull") ||
     (strategy.includes("Long") && strategy.includes("Call"));
-  const rangeMin = lowerStrike - spreadWidth * 1.2;
-  const rangeMax = upperStrike + spreadWidth * 1.2;
+  const isPut = strategy.includes("Put");
+
+  let lowerStrike = strikeShort == null ? strikeLong : Math.min(strikeLong, strikeShort);
+  let upperStrike = strikeShort == null ? strikeLong : Math.max(strikeLong, strikeShort);
+
+  if (strikeShort == null) {
+    const gap = Math.max(Math.abs(breakeven - strikeLong), Math.abs(strikeLong) * 0.03, 1);
+    if (isBullish) {
+      lowerStrike = strikeLong;
+      upperStrike = strikeLong + gap * 2;
+    } else {
+      upperStrike = strikeLong;
+      lowerStrike = strikeLong - gap * 2;
+    }
+  }
+
+  const width = Math.max(upperStrike - lowerStrike, 0.0001);
+  const rangeMin = lowerStrike - width * 1.15;
+  const rangeMax = upperStrike + width * 1.15;
 
   const markers: Marker[] = [
     { value: strikeLong, label: "LONG", color: DESIGN.muted },
@@ -160,7 +215,21 @@ function buildPayoffModel({
     markers.push({ value: stopLoss, label: "STOP", color: DESIGN.red });
   }
 
-  const safeMaxProfit = maxProfit ?? spreadWidth * 100 * size;
+  const segments = isBullish
+    ? [
+        safeSegment(rangeMin, lowerStrike, ZONE.maxLoss),
+        safeSegment(lowerStrike, breakeven, ZONE.recover),
+        safeSegment(breakeven, upperStrike, ZONE.profit),
+        safeSegment(upperStrike, rangeMax, ZONE.maxProfit),
+      ]
+    : [
+        safeSegment(rangeMin, lowerStrike, ZONE.maxProfit),
+        safeSegment(lowerStrike, breakeven, ZONE.profit),
+        safeSegment(breakeven, upperStrike, ZONE.recover),
+        safeSegment(upperStrike, rangeMax, ZONE.maxLoss),
+      ];
+
+  const safeMaxProfit = maxProfit ?? width * 100 * size;
 
   const pnlAtPrice = (spot: number) => {
     if (strikeShort != null) {
@@ -177,7 +246,7 @@ function buildPayoffModel({
       return safeMaxProfit - t * (safeMaxProfit + maxRisk);
     }
 
-    if (strategy.includes("Put")) {
+    if (isPut) {
       return Math.max(0, strikeLong - spot) * 100 * size - maxRisk;
     }
     return Math.max(0, spot - strikeLong) * 100 * size - maxRisk;
@@ -187,11 +256,23 @@ function buildPayoffModel({
     rangeMin,
     rangeMax,
     markers,
-      summary: [
-        `Breakeven $${breakeven.toFixed(2)}`,
-        `Max risk $${maxRisk.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-      ],
+    segments: segments.filter((segment): segment is ZoneSegment => Boolean(segment)),
+    summary: [
+      `Breakeven $${breakeven.toFixed(2)}`,
+      `Max risk $${maxRisk.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+    ],
     pnlAtPrice,
+    colorAtPrice: (spot) => {
+      if (isBullish) {
+        if (spot < lowerStrike) return DESIGN.red;
+        if (spot < breakeven) return DESIGN.yellow;
+        return DESIGN.green;
+      }
+      if (spot <= lowerStrike) return DESIGN.green;
+      if (spot < breakeven) return DESIGN.green;
+      if (spot < upperStrike) return DESIGN.yellow;
+      return DESIGN.red;
+    },
   };
 }
 
@@ -222,38 +303,21 @@ export function BreakevenBar({
   if (!model) return null;
 
   const width = 1000;
-  const height = 84;
-  const padX = 28;
-  const padY = 10;
-  const innerW = width - padX * 2;
-  const innerH = height - padY * 2;
-
-  const points = Array.from({ length: 140 }, (_, idx) => {
-    const t = idx / 139;
-    const x = model.rangeMin + t * (model.rangeMax - model.rangeMin);
-    const pnl = model.pnlAtPrice(x);
-    return { x, pnl };
-  });
-
-  let pnlMin = Math.min(...points.map((p) => p.pnl), -maxRisk);
-  let pnlMax = Math.max(...points.map((p) => p.pnl), maxProfit ?? 0);
-  if (pnlMax <= pnlMin) pnlMax = pnlMin + 1;
-  const pnlPadding = (pnlMax - pnlMin) * 0.15;
-  pnlMin -= pnlPadding;
-  pnlMax += pnlPadding;
-
-  const xToSvg = (x: number) => padX + ((x - model.rangeMin) / (model.rangeMax - model.rangeMin)) * innerW;
-  const yToSvg = (pnl: number) => padY + ((pnlMax - pnl) / (pnlMax - pnlMin)) * innerH;
-  const zeroY = yToSvg(0);
+  const height = 76;
+  const padX = 24;
+  const barTop = 20;
+  const barHeight = 24;
+  const range = Math.max(model.rangeMax - model.rangeMin, 0.0001);
+  const xToSvg = (x: number) => padX + ((x - model.rangeMin) / range) * (width - padX * 2);
 
   const markers = model.markers
     .filter((marker) => marker.value >= model.rangeMin && marker.value <= model.rangeMax)
     .map((marker) => ({ ...marker, x: xToSvg(marker.value) }));
-  const laidOutMarkers = withMarkerLayout(markers, width, padX, height, padY);
+  const laidOutMarkers = withMarkerLayout(markers, width, padX);
 
   const priceX = price != null ? xToSvg(clamp(price, model.rangeMin, model.rangeMax)) : null;
   const pricePnl = price != null ? model.pnlAtPrice(price) : null;
-  const priceY = pricePnl != null ? yToSvg(pricePnl) : null;
+  const priceColor = price != null ? model.colorAtPrice(price) : DESIGN.muted;
 
   return (
     <div style={{ marginTop: "7px" }}>
@@ -278,31 +342,50 @@ export function BreakevenBar({
           borderRadius: "8px",
           overflow: "hidden",
           border: `1px solid ${DESIGN.cardBorder}`,
-          background:
-            "linear-gradient(180deg, rgba(74,222,128,0.05) 0%, rgba(74,222,128,0.03) 48%, rgba(248,113,113,0.04) 52%, rgba(248,113,113,0.07) 100%)",
+          background: "rgba(255,255,255,0.02)",
         }}
       >
         <svg
           viewBox={`0 0 ${width} ${height}`}
-          style={{ width: "100%", height: "94px", display: "block" }}
+          style={{ width: "100%", height: "74px", display: "block" }}
           preserveAspectRatio="xMidYMid meet"
         >
-          <line x1={padX} y1={zeroY} x2={width - padX} y2={zeroY} stroke="rgba(255,255,255,0.2)" strokeDasharray="4 4" />
-
-          {points.slice(0, -1).map((point, index) => {
-            const next = points[index + 1];
-            const x1 = xToSvg(point.x);
-            const y1 = yToSvg(point.pnl);
-            const x2 = xToSvg(next.x);
-            const y2 = yToSvg(next.pnl);
-            const mid = (point.pnl + next.pnl) / 2;
-            const stroke = mid >= 0 ? DESIGN.green : DESIGN.red;
-            return <line key={`${index}-${point.x}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={stroke} strokeWidth="2.2" />;
+          {model.segments.map((segment, index) => {
+            const x1 = xToSvg(Math.max(segment.from, model.rangeMin));
+            const x2 = xToSvg(Math.min(segment.to, model.rangeMax));
+            const segmentWidth = Math.max(0, x2 - x1);
+            if (segmentWidth <= 0) return null;
+            return (
+              <rect
+                key={`${index}-${segment.from}-${segment.to}`}
+                x={x1}
+                y={barTop}
+                width={segmentWidth}
+                height={barHeight}
+                fill={segment.color}
+              />
+            );
           })}
+
+          <line
+            x1={padX}
+            y1={barTop + barHeight / 2}
+            x2={width - padX}
+            y2={barTop + barHeight / 2}
+            stroke="rgba(255,255,255,0.22)"
+            strokeDasharray="3 4"
+          />
 
           {laidOutMarkers.map((marker) => (
             <g key={`${marker.label}-${marker.value}`}>
-              <line x1={marker.x} y1={padY} x2={marker.x} y2={height - padY} stroke={marker.color} strokeOpacity="0.7" />
+              <line
+                x1={marker.x}
+                y1={barTop - 1}
+                x2={marker.x}
+                y2={barTop + barHeight + 8}
+                stroke={marker.color}
+                strokeOpacity="0.75"
+              />
               <text
                 x={marker.x + marker.textDx}
                 y={marker.labelY}
@@ -327,26 +410,26 @@ export function BreakevenBar({
             </g>
           ))}
 
-          {priceX != null && priceY != null && (
+          {priceX != null && price != null && (
             <g>
               <circle
                 cx={priceX}
-                cy={priceY}
+                cy={barTop + barHeight / 2}
                 r="4.5"
-                fill={pricePnl != null && pricePnl >= 0 ? DESIGN.green : DESIGN.red}
+                fill={priceColor}
                 stroke="#fff"
-                strokeWidth="1.6"
+                strokeWidth="1.5"
               />
               <text
                 x={priceX}
-                y={Math.max(padY + 12, priceY - 10)}
+                y={barTop - 4}
                 fill={DESIGN.bright}
                 fontSize="9"
                 fontFamily={DESIGN.mono}
                 textAnchor="middle"
                 fontWeight="700"
               >
-                ${price?.toFixed(2)}
+                ${price.toFixed(2)}
               </text>
             </g>
           )}
@@ -355,14 +438,21 @@ export function BreakevenBar({
 
       <div style={{ display: "flex", gap: "12px", marginTop: "4px", fontSize: "9px", color: DESIGN.muted, flexWrap: "wrap" }}>
         <span>
-          <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "50%", background: DESIGN.green, marginRight: "4px" }} />
+          <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "2px", background: ZONE.maxLoss, marginRight: "4px" }} />
+          Max loss
+        </span>
+        <span>
+          <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "2px", background: ZONE.recover, marginRight: "4px" }} />
+          Recovery
+        </span>
+        <span>
+          <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "2px", background: ZONE.profit, marginRight: "4px" }} />
           Profit zone
         </span>
         <span>
-          <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "50%", background: DESIGN.red, marginRight: "4px" }} />
-          Loss zone
+          <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "2px", background: ZONE.maxProfit, marginRight: "4px" }} />
+          Max profit
         </span>
-        <span>Dotted line: breakeven/payoff zero</span>
       </div>
     </div>
   );

@@ -136,8 +136,131 @@ function toNum(value) {
   if (typeof value === "string") {
     const n = Number(value.replace(/,/g, ""));
     if (Number.isFinite(n)) return n;
+    const match = value.match(/-?\d+(?:\.\d+)?/);
+    if (match) {
+      const parsed = Number(match[0]);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  if (value && typeof value === "object") {
+    const candidate =
+      toNum(value.value) ??
+      toNum(value.amount) ??
+      toNum(value.val) ??
+      toNum(value.displayValue);
+    if (candidate != null) return candidate;
   }
   return null;
+}
+
+function resolveEndpointSpec(endpointId, accountId, days, symbol, conids) {
+  const safeAccount = String(accountId || DEFAULT_ACCOUNT_ID).trim();
+  const safeDays = Number.isFinite(Number(days))
+    ? Math.max(1, Math.min(3650, Number(days)))
+    : state.preferences.days;
+  const safeSymbol = String(symbol || "").trim().toUpperCase() || "AAPL";
+  const safeConids = String(conids || "").trim() || "265598";
+
+  switch (endpointId) {
+    case "auth-status":
+      return {
+        id: endpointId,
+        label: "Auth Status",
+        method: "GET",
+        url: `${CPGW_BASE}/iserver/auth/status`,
+      };
+    case "accounts":
+      return {
+        id: endpointId,
+        label: "Accounts",
+        method: "GET",
+        url: `${CPGW_BASE}/iserver/accounts`,
+      };
+    case "summary":
+      return {
+        id: endpointId,
+        label: "Portfolio Summary",
+        method: "GET",
+        url: `${CPGW_BASE}/portfolio/${encodeURIComponent(safeAccount)}/summary`,
+      };
+    case "ledger":
+      return {
+        id: endpointId,
+        label: "Portfolio Ledger",
+        method: "GET",
+        url: `${CPGW_BASE}/portfolio/${encodeURIComponent(safeAccount)}/ledger`,
+      };
+    case "positions-v2":
+      return {
+        id: endpointId,
+        label: "Positions v2",
+        method: "GET",
+        url: `${CPGW_BASE}/portfolio2/${encodeURIComponent(safeAccount)}/positions`,
+      };
+    case "positions-v2-page0":
+      return {
+        id: endpointId,
+        label: "Positions v2 Page 0",
+        method: "GET",
+        url: `${CPGW_BASE}/portfolio2/${encodeURIComponent(safeAccount)}/positions/0`,
+      };
+    case "positions-v1-page0":
+      return {
+        id: endpointId,
+        label: "Positions v1 Page 0",
+        method: "GET",
+        url: `${CPGW_BASE}/portfolio/${encodeURIComponent(safeAccount)}/positions/0`,
+      };
+    case "trades":
+      return {
+        id: endpointId,
+        label: "Trades Window",
+        method: "GET",
+        url: `${CPGW_BASE}/iserver/account/trades?days=${safeDays}`,
+      };
+    case "secdef-search":
+      return {
+        id: endpointId,
+        label: "SecDef Search",
+        method: "GET",
+        url: `${CPGW_BASE}/iserver/secdef/search?symbol=${encodeURIComponent(safeSymbol)}`,
+      };
+    case "marketdata-snapshot":
+      return {
+        id: endpointId,
+        label: "MarketData Snapshot",
+        method: "GET",
+        url: `${CPGW_BASE}/iserver/marketdata/snapshot?conids=${encodeURIComponent(safeConids)}&fields=31,55,84,86`,
+      };
+    case "tickle":
+      return {
+        id: endpointId,
+        label: "Tickle",
+        method: "GET",
+        url: `${CPGW_BASE}/tickle`,
+      };
+    default:
+      return null;
+  }
+}
+
+function listEndpointSpecs(accountId, days, symbol, conids) {
+  const ids = [
+    "auth-status",
+    "accounts",
+    "summary",
+    "ledger",
+    "positions-v2",
+    "positions-v2-page0",
+    "positions-v1-page0",
+    "trades",
+    "secdef-search",
+    "marketdata-snapshot",
+    "tickle",
+  ];
+  return ids
+    .map((id) => resolveEndpointSpec(id, accountId, days, symbol, conids))
+    .filter((item) => item != null);
 }
 
 function parseAccounts(data) {
@@ -745,8 +868,19 @@ function html() {
     </div>
 
     <div class="card">
-      <div class="mono" style="margin-bottom:6px;">Sync Response</div>
-      <pre id="syncOutput">—</pre>
+      <div class="mono" style="margin-bottom:6px;">IBKR Endpoint Tester</div>
+      <div class="row" style="margin-bottom:8px;">
+        <select id="endpointSelect" class="input mono" style="min-width:280px;"></select>
+        <label class="muted">Symbol</label>
+        <input id="endpointSymbol" class="input mono" value="AAPL" style="min-width:110px;" />
+        <label class="muted">Conids</label>
+        <input id="endpointConids" class="input mono" value="265598" style="min-width:160px;" />
+        <button class="btn gray" id="btnEndpointFetch">Fetch Endpoint</button>
+      </div>
+      <div class="muted" style="margin-bottom:6px;">
+        Endpoints used by preview: accounts, summary, ledger, positions (fallback chain), trades window, secdef + marketdata snapshot.
+      </div>
+      <pre id="endpointOutput">—</pre>
     </div>
 
     <div class="card">
@@ -759,7 +893,11 @@ function html() {
     const gatewayState = document.getElementById("gatewayState");
     const authState = document.getElementById("authState");
     const previewOutput = document.getElementById("previewOutput");
-    const syncOutput = document.getElementById("syncOutput");
+    const endpointOutput = document.getElementById("endpointOutput");
+    const endpointSelect = document.getElementById("endpointSelect");
+    const endpointSymbol = document.getElementById("endpointSymbol");
+    const endpointConids = document.getElementById("endpointConids");
+    const btnEndpointFetch = document.getElementById("btnEndpointFetch");
     const previewMeta = document.getElementById("previewMeta");
     const logOutput = document.getElementById("logOutput");
     const btnFetch = document.getElementById("btnFetch");
@@ -787,6 +925,51 @@ function html() {
       return json;
     }
 
+    function currentEndpointInputs() {
+      return {
+        accountId: document.getElementById("accountId").value.trim(),
+        days: Number(document.getElementById("days").value || "${YTD_DAYS}"),
+        symbol: endpointSymbol.value.trim(),
+        conids: endpointConids.value.trim(),
+      };
+    }
+
+    async function loadEndpointCatalog() {
+      const params = currentEndpointInputs();
+      const query = new URLSearchParams({
+        accountId: params.accountId,
+        days: String(params.days || "${YTD_DAYS}"),
+        symbol: params.symbol || "AAPL",
+        conids: params.conids || "265598",
+      });
+      const data = await call("/api/debug/endpoints?" + query.toString());
+      const selected = endpointSelect.value;
+      endpointSelect.innerHTML = "";
+      for (const item of data.endpoints || []) {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = item.label + "  [" + item.method + "]  " + item.url;
+        endpointSelect.appendChild(option);
+      }
+      if (selected && [...endpointSelect.options].some((opt) => opt.value === selected)) {
+        endpointSelect.value = selected;
+      }
+    }
+
+    async function fetchSelectedEndpoint() {
+      const endpointId = endpointSelect.value;
+      if (!endpointId) return;
+      const params = currentEndpointInputs();
+      const data = await call("/api/debug/fetch", "POST", {
+        endpointId,
+        accountId: params.accountId,
+        days: params.days,
+        symbol: params.symbol,
+        conids: params.conids,
+      });
+      endpointOutput.textContent = JSON.stringify(data, null, 2);
+    }
+
     function setStates(status) {
       gatewayState.textContent = status.gateway_running ? "running" : "stopped";
       gatewayState.className = status.gateway_running ? "ok" : "bad";
@@ -799,6 +982,7 @@ function html() {
       btnSync.disabled = !ok;
       btnClearResync.disabled = !ok;
       btnAutoRun.disabled = !ok;
+      btnEndpointFetch.disabled = !ok;
 
       const auto = status.auto_sync || {};
       autoSyncState.textContent = auto.enabled ? "on" : "off";
@@ -832,6 +1016,7 @@ function html() {
         btnClearResync.disabled = true;
         btnAutoRun.disabled = true;
         btnAutoToggle.disabled = true;
+        btnEndpointFetch.disabled = true;
       }
       try {
         const logs = await call("/api/logs");
@@ -864,6 +1049,7 @@ function html() {
         btnClearResync.disabled = true;
         btnAutoRun.disabled = true;
         btnAutoToggle.disabled = true;
+        btnEndpointFetch.disabled = true;
         autoSyncMeta.textContent = "Stopping panel and CPGW...";
       } catch (e) {
         alert(String(e.message || e));
@@ -930,7 +1116,6 @@ function html() {
           includeTrades: mode === "history",
           syncMode: mode
         });
-        syncOutput.textContent = JSON.stringify(data, null, 2);
         if (data.preview) {
           previewOutput.textContent = JSON.stringify(data.preview, null, 2);
           previewMeta.textContent =
@@ -958,7 +1143,6 @@ function html() {
           days: Number(document.getElementById("days").value || "${YTD_DAYS}")
         });
         syncMode.value = "history";
-        syncOutput.textContent = JSON.stringify(data, null, 2);
         if (data.preview) {
           previewOutput.textContent = JSON.stringify(data.preview, null, 2);
           previewMeta.textContent =
@@ -1014,7 +1198,31 @@ function html() {
       await refreshStatus();
     };
 
+    btnEndpointFetch.onclick = async () => {
+      try {
+        await fetchSelectedEndpoint();
+      } catch (e) {
+        alert(String(e.message || e));
+      }
+    };
+
+    document.getElementById("accountId").onchange = async () => {
+      try { await loadEndpointCatalog(); } catch {}
+    };
+    document.getElementById("days").onchange = async () => {
+      try { await loadEndpointCatalog(); } catch {}
+    };
+    endpointSymbol.onchange = async () => {
+      try { await loadEndpointCatalog(); } catch {}
+    };
+    endpointConids.onchange = async () => {
+      try { await loadEndpointCatalog(); } catch {}
+    };
+
     refreshStatus();
+    loadEndpointCatalog().catch(() => {
+      endpointOutput.textContent = "Failed to load endpoint catalog.";
+    });
     statusPollHandle.id = setInterval(refreshStatus, 7000);
   </script>
 </body>
@@ -1051,6 +1259,51 @@ const server = http.createServer(async (req, res) => {
         syncMode: state.preferences.syncMode,
       },
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/debug/endpoints") {
+    const accountId = String(url.searchParams.get("accountId") ?? state.preferences.accountId).trim();
+    const days = Number(url.searchParams.get("days") ?? state.preferences.days);
+    const symbol = String(url.searchParams.get("symbol") ?? "AAPL").trim();
+    const conids = String(url.searchParams.get("conids") ?? "265598").trim();
+    const endpoints = listEndpointSpecs(accountId, days, symbol, conids);
+    sendJson(res, 200, {
+      ok: true,
+      accountId,
+      days: Number.isFinite(days) ? Math.max(1, Math.min(3650, Math.floor(days))) : state.preferences.days,
+      endpoints,
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/debug/fetch") {
+    try {
+      const body = await readBody(req);
+      const endpoint = resolveEndpointSpec(
+        String(body.endpointId ?? ""),
+        body.accountId ?? state.preferences.accountId,
+        body.days ?? state.preferences.days,
+        body.symbol ?? "AAPL",
+        body.conids ?? "265598",
+      );
+      if (!endpoint) {
+        sendJson(res, 400, { error: "Unknown endpointId." });
+        return;
+      }
+      const response = await fetchJson(endpoint.url, { method: endpoint.method });
+      pushLog(`Debug fetch: ${endpoint.id} (${response.status})`);
+      sendJson(res, 200, {
+        ok: response.ok,
+        endpoint,
+        status: response.status,
+        error: response.error,
+        data: response.data,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Endpoint fetch failed";
+      sendJson(res, 500, { error: message });
+    }
     return;
   }
 
