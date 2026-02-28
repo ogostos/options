@@ -898,6 +898,10 @@ function html() {
       <div class="muted" style="margin-bottom:6px;">
         Endpoints used by preview: accounts, summary, ledger, positions (fallback chain), trades window, secdef + marketdata snapshot.
       </div>
+      <div class="row" style="margin-bottom:6px; justify-content:flex-end;">
+        <button class="btn gray" id="btnEndpointCopy">Copy JSON</button>
+        <span class="muted" id="endpointCopyStatus"> </span>
+      </div>
       <pre id="endpointOutput">—</pre>
     </div>
 
@@ -916,6 +920,8 @@ function html() {
     const endpointSymbol = document.getElementById("endpointSymbol");
     const endpointConids = document.getElementById("endpointConids");
     const btnEndpointFetch = document.getElementById("btnEndpointFetch");
+    const btnEndpointCopy = document.getElementById("btnEndpointCopy");
+    const endpointCopyStatus = document.getElementById("endpointCopyStatus");
     const previewMeta = document.getElementById("previewMeta");
     const logOutput = document.getElementById("logOutput");
     const btnFetch = document.getElementById("btnFetch");
@@ -1222,6 +1228,23 @@ function html() {
       } catch (e) {
         alert(String(e.message || e));
       }
+    };
+
+    btnEndpointCopy.onclick = async () => {
+      const text = endpointOutput.textContent || "";
+      if (!text || text === "—") {
+        endpointCopyStatus.textContent = "No JSON to copy";
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        endpointCopyStatus.textContent = "Copied";
+      } catch {
+        endpointCopyStatus.textContent = "Copy failed";
+      }
+      setTimeout(() => {
+        endpointCopyStatus.textContent = " ";
+      }, 1500);
     };
 
     document.getElementById("accountId").onchange = async () => {
