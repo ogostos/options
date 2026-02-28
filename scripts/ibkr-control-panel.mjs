@@ -39,6 +39,7 @@ const state = {
   preferences: {
     accountId: DEFAULT_ACCOUNT_ID,
     days: Number.isFinite(DEFAULT_TRADES_DAYS) ? Math.max(1, Math.min(3650, DEFAULT_TRADES_DAYS)) : YTD_DAYS,
+    syncMode: "live",
   },
   autoSync: {
     enabled: false,
@@ -235,6 +236,7 @@ function startGateway() {
   const confArg = normalizeConfArg(CPGW_CONF_INPUT);
   const proc = spawn(CPGW_RUN_SH, [confArg], {
     cwd: CPGW_HOME_DIR,
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
   state.gatewayProcess = proc;
@@ -243,6 +245,7 @@ function startGateway() {
   proc.stdout?.on("data", (chunk) => pushLog(`[cpgw] ${String(chunk).trim()}`));
   proc.stderr?.on("data", (chunk) => pushLog(`[cpgw:err] ${String(chunk).trim()}`));
   proc.on("close", (code) => {
+    state.gatewayProcess = null;
     pushLog(`CPGW exited (code=${code ?? "null"})`);
   });
 
@@ -253,8 +256,43 @@ function stopGateway() {
   if (!gatewayRunning()) {
     return { ok: true, message: "Gateway is not running." };
   }
-  state.gatewayProcess.kill("SIGTERM");
-  return { ok: true, message: "Gateway stop signal sent." };
+  const pid = state.gatewayProcess?.pid;
+  if (!pid) {
+    return { ok: true, message: "Gateway PID not found; considered stopped." };
+  }
+
+  let signaled = false;
+  try {
+    process.kill(-pid, "SIGTERM");
+    signaled = true;
+  } catch {
+    // fallback to direct process signal
+  }
+  if (!signaled) {
+    try {
+      process.kill(pid, "SIGTERM");
+      signaled = true;
+    } catch {
+      // ignore
+    }
+  }
+
+  setTimeout(() => {
+    if (!gatewayRunning()) return;
+    try {
+      process.kill(-pid, "SIGKILL");
+      pushLog("Gateway force-killed via process group.");
+    } catch {
+      try {
+        process.kill(pid, "SIGKILL");
+        pushLog("Gateway force-killed via PID.");
+      } catch {
+        pushLog("Gateway did not respond to stop signals.");
+      }
+    }
+  }, 1800);
+
+  return { ok: true, message: signaled ? "Gateway stop signal sent." : "Gateway signal failed; will retry kill." };
 }
 
 function shutdownPanelProcess() {
@@ -268,17 +306,7 @@ function shutdownPanelProcess() {
   state.autoSync.enabled = false;
 
   if (gatewayRunning()) {
-    state.gatewayProcess.kill("SIGTERM");
-    setTimeout(() => {
-      if (gatewayRunning()) {
-        pushLog("CPGW did not exit on SIGTERM; sending SIGKILL.");
-        try {
-          state.gatewayProcess.kill("SIGKILL");
-        } catch {
-          // ignore
-        }
-      }
-    }, 1200);
+    stopGateway();
   }
 
   const forceExit = setTimeout(() => {
@@ -497,6 +525,11 @@ function html() {
         <input id="accountId" class="input mono" value="${DEFAULT_ACCOUNT_ID}" />
         <label class="muted">History Days (manual)</label>
         <input id="days" class="input mono" value="${Number.isFinite(DEFAULT_TRADES_DAYS) ? Math.max(1, Math.min(3650, DEFAULT_TRADES_DAYS)) : YTD_DAYS}" />
+        <label class="muted">Sync Mode</label>
+        <select id="syncMode" class="input mono" style="min-width:160px;">
+          <option value="live" selected>Live only</option>
+          <option value="history">Full history</option>
+        </select>
       </div>
       <div class="row" style="margin-top:8px;">
         <button class="btn green" id="btnFetch">Fetch Live Preview</button>
@@ -555,6 +588,8 @@ function html() {
     const autoSyncInterval = document.getElementById("autoSyncInterval");
     const btnAutoToggle = document.getElementById("btnAutoToggle");
     const btnAutoRun = document.getElementById("btnAutoRun");
+    const syncMode = document.getElementById("syncMode");
+    const statusPollHandle = { id: null };
 
     async function call(url, method = "GET", body) {
       const resp = await fetch(url, {
@@ -589,6 +624,9 @@ function html() {
         auto.lastError
           ? ("Error: " + auto.lastError)
           : ("Account " + (auto.accountId || "—") + " · Days " + (auto.days || "—") + " · Last attempt " + (auto.lastAttemptAt ? new Date(auto.lastAttemptAt).toLocaleTimeString() : "—"));
+      if (typeof auto.syncMode === "string") {
+        syncMode.value = auto.syncMode;
+      }
     }
 
     async function refreshStatus() {
@@ -603,6 +641,8 @@ function html() {
         btnFetch.disabled = true;
         btnFetchHistory.disabled = true;
         btnSync.disabled = true;
+        btnAutoRun.disabled = true;
+        btnAutoToggle.disabled = true;
       }
       try {
         const logs = await call("/api/logs");
@@ -619,6 +659,10 @@ function html() {
 
     document.getElementById("btnStop").onclick = async () => {
       try {
+        if (statusPollHandle.id) {
+          clearInterval(statusPollHandle.id);
+          statusPollHandle.id = null;
+        }
         await call("/api/gateway/stop", "POST");
         gatewayState.textContent = "stopping";
         gatewayState.className = "bad";
@@ -644,6 +688,7 @@ function html() {
           accountId,
           includeTrades: false
         });
+        syncMode.value = "live";
         previewOutput.textContent = JSON.stringify(data.preview, null, 2);
         previewMeta.textContent = "Live preview ready: " + data.preview.positions.length + " positions, " + data.preview.trades.length + " trades.";
       } catch (e) {
@@ -661,6 +706,7 @@ function html() {
           days,
           includeTrades: true
         });
+        syncMode.value = "history";
         previewOutput.textContent = JSON.stringify(data.preview, null, 2);
         previewMeta.textContent = "History preview ready: " + data.preview.positions.length + " positions, " + data.preview.trades.length + " trades.";
       } catch (e) {
@@ -671,8 +717,24 @@ function html() {
 
     document.getElementById("btnSync").onclick = async () => {
       try {
-        const data = await call("/api/sync", "POST");
+        const mode = syncMode.value === "history" ? "history" : "live";
+        const data = await call("/api/sync", "POST", {
+          accountId: document.getElementById("accountId").value.trim(),
+          days: Number(document.getElementById("days").value || "${YTD_DAYS}"),
+          includeTrades: mode === "history",
+          syncMode: mode
+        });
         syncOutput.textContent = JSON.stringify(data, null, 2);
+        if (data.preview) {
+          previewOutput.textContent = JSON.stringify(data.preview, null, 2);
+          previewMeta.textContent =
+            (mode === "history" ? "History" : "Live") +
+            " sync complete: " +
+            data.preview.positions.length +
+            " positions, " +
+            data.preview.trades.length +
+            " trades.";
+        }
       } catch (e) {
         alert(String(e.message || e));
       }
@@ -686,7 +748,7 @@ function html() {
           enabled,
           intervalSeconds: Number(autoSyncInterval.value || "60"),
           accountId: document.getElementById("accountId").value.trim(),
-          days: Number(document.getElementById("days").value || "7")
+          days: Number(document.getElementById("days").value || "${YTD_DAYS}")
         });
       } catch (e) {
         alert(String(e.message || e));
@@ -699,7 +761,7 @@ function html() {
         await call("/api/auto-sync", "POST", {
           intervalSeconds: Number(autoSyncInterval.value || "60"),
           accountId: document.getElementById("accountId").value.trim(),
-          days: Number(document.getElementById("days").value || "7")
+          days: Number(document.getElementById("days").value || "${YTD_DAYS}")
         });
       } catch (e) {
         alert(String(e.message || e));
@@ -711,7 +773,7 @@ function html() {
       try {
         await call("/api/auto-sync/run", "POST", {
           accountId: document.getElementById("accountId").value.trim(),
-          days: Number(document.getElementById("days").value || "7")
+          days: Number(document.getElementById("days").value || "${YTD_DAYS}")
         });
       } catch (e) {
         alert(String(e.message || e));
@@ -720,7 +782,7 @@ function html() {
     };
 
     refreshStatus();
-    setInterval(refreshStatus, 7000);
+    statusPollHandle.id = setInterval(refreshStatus, 7000);
   </script>
 </body>
 </html>`;
@@ -753,6 +815,7 @@ const server = http.createServer(async (req, res) => {
         lastError: state.autoSync.lastError,
         accountId: state.preferences.accountId,
         days: state.preferences.days,
+        syncMode: state.preferences.syncMode,
       },
     });
     return;
@@ -776,6 +839,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/fetch/preview") {
     try {
       const body = await readBody(req);
+      if (typeof body.syncMode === "string") {
+        state.preferences.syncMode = body.syncMode === "history" ? "history" : "live";
+      } else if (typeof body.includeTrades === "boolean") {
+        state.preferences.syncMode = body.includeTrades ? "history" : "live";
+      }
       const preview = await buildPreview(body.accountId, body.days, {
         includeTrades: body.includeTrades !== false,
       });
@@ -790,15 +858,15 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && url.pathname === "/api/sync") {
     try {
-      if (!state.preview) {
-        sendJson(res, 400, { error: "No preview loaded. Fetch preview first." });
-        return;
-      }
-
       const body = await readBody(req);
-      const response = await syncPreview(state.preview, body);
+      const includeTrades = body.includeTrades === true;
+      state.preferences.syncMode = includeTrades ? "history" : "live";
+      const preview = await buildPreview(body.accountId, body.days, {
+        includeTrades,
+      });
+      const response = await syncPreview(preview, body);
       pushLog("Sync completed successfully.");
-      sendJson(res, 200, { ok: true, response });
+      sendJson(res, 200, { ok: true, preview, response });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Sync failed";
       pushLog(`Sync error: ${message}`);
