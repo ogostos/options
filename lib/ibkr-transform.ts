@@ -82,6 +82,20 @@ function pickSummary(summary: Record<string, unknown>, lookup: Map<string, numbe
   return null;
 }
 
+function pickUnderlyingPriceMap(summary: Record<string, unknown>): Record<string, number> {
+  const raw = summary.__underlying_prices;
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [tickerRaw, value] of Object.entries(raw as Record<string, unknown>)) {
+    const ticker = String(tickerRaw).trim().toUpperCase();
+    if (!ticker) continue;
+    const numeric = toNum(value);
+    if (numeric == null) continue;
+    out[ticker] = Number(numeric.toFixed(4));
+  }
+  return out;
+}
+
 function yymmddToDate(value: string): string | null {
   if (!/^\d{6}$/.test(value)) return null;
   const yy = Number(value.slice(0, 2));
@@ -626,6 +640,13 @@ export function buildIbkrLiveModel(snapshot: IbkrSyncSnapshot): IbkrLiveModel {
     excessLiquidity: pickSummary(summary, lookup, ["excessLiquidity", "ExcessLiquidity"]),
     marginDebt: cash != null && cash < 0 ? Math.abs(cash) : 0,
   };
+
+  const summaryUnderlyings = pickUnderlyingPriceMap(summary);
+  for (const [ticker, px] of Object.entries(summaryUnderlyings)) {
+    if (!(ticker in underlyingPrices)) {
+      underlyingPrices[ticker] = px;
+    }
+  }
 
   return {
     accountSummary,

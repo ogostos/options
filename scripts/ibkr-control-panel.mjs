@@ -257,6 +257,106 @@ function normalizeTrades(data) {
   });
 }
 
+function parseOptionTickerFromPosition(row) {
+  const raw = `${row.symbol ?? ""} ${row.contract ?? ""}`.toUpperCase();
+  const match = raw.match(/([A-Z.]+)\s+\d{6}[CP]\d{8}/);
+  if (!match) return null;
+  return String(match[1]).trim();
+}
+
+function parseSnapshotPrice(rawRow) {
+  if (!rawRow || typeof rawRow !== "object") return null;
+  const candidates = [
+    rawRow["31"],
+    rawRow["55"],
+    rawRow["84"],
+    rawRow["86"],
+    rawRow.last,
+    rawRow.last_price,
+    rawRow.marketPrice,
+  ];
+  for (const candidate of candidates) {
+    const value = toNum(candidate);
+    if (value != null) return value;
+  }
+  return null;
+}
+
+async function fetchUnderlyingPricesFromIbkr(accountId, positions) {
+  const notes = [];
+  const underlyings = {};
+
+  const tickers = [
+    ...new Set(
+      positions
+        .map((row) => parseOptionTickerFromPosition(row))
+        .filter((value) => typeof value === "string" && value.length > 0),
+    ),
+  ];
+
+  if (tickers.length === 0) {
+    return { underlyings, notes };
+  }
+
+  const tickerToConid = new Map();
+  for (const ticker of tickers) {
+    const secdef = await fetchJson(`${CPGW_BASE}/iserver/secdef/search?symbol=${encodeURIComponent(ticker)}`);
+    if (!secdef.ok || !Array.isArray(secdef.data)) {
+      notes.push(`Underlying secdef failed for ${ticker} (${secdef.status})`);
+      continue;
+    }
+
+    const chosen =
+      secdef.data.find((item) => toNum(item?.conid) != null && String(item?.symbol ?? "").toUpperCase() === ticker) ??
+      secdef.data.find((item) => toNum(item?.conid) != null);
+    const conid = toNum(chosen?.conid);
+    if (conid == null) {
+      notes.push(`Underlying conid missing for ${ticker}`);
+      continue;
+    }
+    tickerToConid.set(ticker, conid);
+  }
+
+  if (tickerToConid.size === 0) {
+    return { underlyings, notes };
+  }
+
+  const conids = [...tickerToConid.values()];
+  const chunks = [];
+  for (let i = 0; i < conids.length; i += 40) {
+    chunks.push(conids.slice(i, i + 40));
+  }
+
+  const rowByConid = new Map();
+  for (const chunk of chunks) {
+    const url = `${CPGW_BASE}/iserver/marketdata/snapshot?conids=${chunk.join(",")}&fields=31,55,84,86`;
+    // IBKR snapshot often needs a warm-up call.
+    await fetchJson(url);
+    const snap = await fetchJson(url);
+    if (!snap.ok || !Array.isArray(snap.data)) {
+      notes.push(`Underlying snapshot failed (${snap.status})`);
+      continue;
+    }
+    for (const row of snap.data) {
+      const conid = toNum(row?.conid);
+      if (conid == null) continue;
+      rowByConid.set(conid, row);
+    }
+  }
+
+  for (const [ticker, conid] of tickerToConid.entries()) {
+    const row = rowByConid.get(conid);
+    const price = parseSnapshotPrice(row);
+    if (price == null) {
+      notes.push(`Underlying price missing for ${ticker}`);
+      continue;
+    }
+    underlyings[ticker] = Number(price.toFixed(4));
+  }
+
+  return { underlyings, notes };
+}
+
 function gatewayRunning() {
   return Boolean(state.gatewayProcess && state.gatewayProcess.exitCode == null && !state.gatewayProcess.killed);
 }
@@ -368,6 +468,7 @@ async function fetchAuthStatus() {
 
 async function buildPreview(accountIdInput, daysInput, options = {}) {
   const includeTrades = options.includeTrades !== false;
+  const includeUnderlyings = options.includeUnderlyings !== false;
   const notes = [];
   const auth = await fetchAuthStatus();
   if (!auth.authenticated || !auth.connected) {
@@ -421,12 +522,24 @@ async function buildPreview(accountIdInput, daysInput, options = {}) {
     ...normalizeSummaryFromLedger(ledgerResp.data),
   };
 
-      const preview = {
+  const normalizedPositions = normalizePositions(positionsResp.data);
+  if (includeUnderlyings) {
+    const fetched = await fetchUnderlyingPricesFromIbkr(accountId, normalizedPositions);
+    if (Object.keys(fetched.underlyings).length > 0) {
+      summary.__underlying_prices = fetched.underlyings;
+      notes.push(`underlyings=${Object.keys(fetched.underlyings).length}`);
+    }
+    if (fetched.notes.length > 0) {
+      notes.push(...fetched.notes);
+    }
+  }
+
+  const preview = {
     account_id: accountId,
     source: "cpgw-local",
     fetched_at: nowIso(),
     summary,
-    positions: normalizePositions(positionsResp.data),
+    positions: normalizedPositions,
     trades: includeTrades ? normalizeTrades(tradesResp.data) : [],
     notes: includeTrades ? [...notes, `trades_days=${days}`] : notes,
       meta: {
@@ -602,6 +715,7 @@ function html() {
       <div class="row" style="margin-top:8px;">
         <button class="btn green" id="btnFetch">Fetch Live Preview</button>
         <button class="btn gray" id="btnFetchHistory">Fetch Full History</button>
+        <button class="btn gray" id="btnFetchUnderlyings">Fetch Underlyings</button>
         <button class="btn green" id="btnSync">Sync To DB</button>
         <button class="btn red" id="btnClearResync">Clear IBKR DB + Full Resync</button>
         <span class="muted">Sync does fetch+sync. Auto-sync fetches summary + positions (no trades).</span>
@@ -650,6 +764,7 @@ function html() {
     const logOutput = document.getElementById("logOutput");
     const btnFetch = document.getElementById("btnFetch");
     const btnFetchHistory = document.getElementById("btnFetchHistory");
+    const btnFetchUnderlyings = document.getElementById("btnFetchUnderlyings");
     const btnSync = document.getElementById("btnSync");
     const btnClearResync = document.getElementById("btnClearResync");
     const autoSyncState = document.getElementById("autoSyncState");
@@ -680,6 +795,7 @@ function html() {
       authState.className = ok ? "ok" : "bad";
       btnFetch.disabled = !ok;
       btnFetchHistory.disabled = !ok;
+      btnFetchUnderlyings.disabled = !ok;
       btnSync.disabled = !ok;
       btnClearResync.disabled = !ok;
       btnAutoRun.disabled = !ok;
@@ -711,6 +827,7 @@ function html() {
         authState.className = "bad";
         btnFetch.disabled = true;
         btnFetchHistory.disabled = true;
+        btnFetchUnderlyings.disabled = true;
         btnSync.disabled = true;
         btnClearResync.disabled = true;
         btnAutoRun.disabled = true;
@@ -742,6 +859,7 @@ function html() {
         authState.className = "bad";
         btnFetch.disabled = true;
         btnFetchHistory.disabled = true;
+        btnFetchUnderlyings.disabled = true;
         btnSync.disabled = true;
         btnClearResync.disabled = true;
         btnAutoRun.disabled = true;
@@ -782,6 +900,21 @@ function html() {
         syncMode.value = "history";
         previewOutput.textContent = JSON.stringify(data.preview, null, 2);
         previewMeta.textContent = "History preview ready: " + data.preview.positions.length + " positions, " + data.preview.trades.length + " trades.";
+      } catch (e) {
+        alert(String(e.message || e));
+      }
+      await refreshStatus();
+    };
+
+    btnFetchUnderlyings.onclick = async () => {
+      const accountId = document.getElementById("accountId").value.trim();
+      try {
+        const data = await call("/api/fetch/underlyings", "POST", {
+          accountId
+        });
+        previewOutput.textContent = JSON.stringify(data, null, 2);
+        const count = Object.keys(data.underlyings || {}).length;
+        previewMeta.textContent = "Underlying prices fetched: " + count + " tickers.";
       } catch (e) {
         alert(String(e.message || e));
       }
@@ -951,6 +1084,32 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to fetch preview";
       pushLog(`Preview error: ${message}`);
+      sendJson(res, 500, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fetch/underlyings") {
+    try {
+      const body = await readBody(req);
+      const preview = await buildPreview(body.accountId, body.days, {
+        includeTrades: false,
+        includeUnderlyings: true,
+      });
+      const underlyings =
+        preview.summary && typeof preview.summary.__underlying_prices === "object"
+          ? preview.summary.__underlying_prices
+          : {};
+      sendJson(res, 200, {
+        ok: true,
+        account_id: preview.account_id,
+        fetched_at: preview.fetched_at,
+        underlyings,
+        notes: preview.notes,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to fetch underlying prices";
+      pushLog(`Underlying fetch error: ${message}`);
       sendJson(res, 500, { error: message });
     }
     return;
